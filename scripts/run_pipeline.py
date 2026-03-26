@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+from datetime import datetime, timezone
 from pathlib import Path
 
 import polars as pl
@@ -7,6 +9,7 @@ import polars as pl
 from footballmodel.config.settings import load_app_config
 from footballmodel.ingestion.clubelo import load_clubelo_csv
 from footballmodel.ingestion.football_data import load_football_data_csv
+from footballmodel.live.monitoring import build_live_review_rows
 from footballmodel.orchestration.pipeline import (
     build_pre_kickoff_benchmark_snapshots,
     build_prediction_time_benchmark_snapshots,
@@ -15,8 +18,17 @@ from footballmodel.orchestration.pipeline import (
 from footballmodel.storage.repository import DuckRepository
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run football model live pipeline")
+    parser.add_argument("--config-name", default=None, help="Named live config to run (defaults to config.default_live_config)")
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     cfg = load_app_config("config/runtime.yaml")
+    selected_config_name, live_cfg = cfg.resolve_live_config(args.config_name)
+
     repo = DuckRepository()
 
     matches_path = Path("data/raw/football_data.csv")
@@ -29,25 +41,40 @@ def main() -> None:
     matches = load_football_data_csv(matches_path)
     elos = load_clubelo_csv(elo_path)
 
-    upcoming = matches.filter(pl.col("home_goals").is_null())
+    upcoming = matches.filter(pl.col("home_goals").is_null() & pl.col("league").is_in(live_cfg.leagues))
     history = matches.filter(pl.col("home_goals").is_not_null())
+
+    run_timestamp = datetime.now(timezone.utc).isoformat()
+    live_run_id = f"live_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
     predictions = []
     prediction_markets: list[dict[str, object]] = []
     snapshots: list[pl.DataFrame] = []
     for fixture in upcoming.iter_rows(named=True):
-        pred = run_fixture_prediction(history, fixture, elos, cfg)
+        pred = run_fixture_prediction(history, fixture, elos, live_cfg)
+        pred["live_run_id"] = live_run_id
+        pred["run_timestamp_utc"] = run_timestamp
+        pred["config_name"] = selected_config_name
+        pred["config_version"] = live_cfg.version
         predictions.append(pred)
         snapshots.append(build_prediction_time_benchmark_snapshots(fixture, pred["timestamp_utc"]))
         for row in pred["markets"]:
+            raw_probability = row["model_probability"]
+            calibrated_probability = raw_probability if live_cfg.calibration.enabled else raw_probability
             prediction_markets.append(
                 {
+                    "live_run_id": live_run_id,
+                    "run_timestamp_utc": run_timestamp,
+                    "config_name": selected_config_name,
+                    "config_version": live_cfg.version,
                     "fixture_id": pred["fixture_id"],
                     "prediction_timestamp_utc": pred["timestamp_utc"],
                     "market": row["market"],
                     "outcome": row["outcome"],
                     "line": float(str(row["outcome"]).split("_", maxsplit=1)[1]) if str(row["market"]) == "AH" else (2.5 if str(row["market"]) == "OU25" else None),
-                    "model_probability": row["model_probability"],
+                    "raw_probability": raw_probability,
+                    "calibrated_probability": calibrated_probability,
+                    "calibration_method": "identity" if live_cfg.calibration.enabled else "disabled",
                     "model_fair_odds": row["model_fair_odds"],
                     "current_price": row.get("current_price"),
                     "benchmark_source": row.get("benchmark_source"),
@@ -67,8 +94,16 @@ def main() -> None:
         repo.upsert_benchmark_snapshots(pl.concat(snapshots))
     if upcoming.height:
         repo.upsert_benchmark_snapshots(build_pre_kickoff_benchmark_snapshots(upcoming))
+
+    benchmark_snapshots = repo.read_df("select * from benchmark_snapshots")
+    live_review = build_live_review_rows(pl.DataFrame(prediction_markets), benchmark_snapshots, matches)
+    repo.write_df("live_model_review", live_review)
     repo.close()
-    print(f"Wrote {len(predictions)} predictions")
+
+    print(
+        f"Wrote {len(predictions)} predictions using config={selected_config_name}"
+        f" version={live_cfg.version} run_id={live_run_id}"
+    )
 
 
 if __name__ == "__main__":
