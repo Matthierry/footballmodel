@@ -105,7 +105,34 @@ def test_sweep_persists_champion_and_diagnostics(tmp_path, sample_matches: pl.Da
     champion = repo.read_df("select * from experiment_champion_view")
     calibration_buckets = repo.read_df("select * from experiment_calibration_buckets")
     false_positive = repo.read_df("select * from experiment_false_positive_zones")
+    metadata = repo.read_df("select * from experiment_sweep_metadata")
     repo.close()
     assert champion.height >= 1
     assert calibration_buckets.height >= 1
     assert false_positive.height >= 0
+    assert metadata.height == 1
+
+
+def test_historical_sweep_rows_are_queryable_by_selected_sweep(tmp_path, sample_matches: pl.DataFrame):
+    cfg = load_app_config("config/runtime.yaml")
+    elo_history = pl.DataFrame({"elo_date": [date(2024, 1, 1)], "team": ["A"], "country": ["ENG"], "elo": [1600.0]})
+    req = SweepRequest(
+        start_date=date(2024, 8, 1),
+        end_date=date(2024, 8, 20),
+        leagues=["ENG1"],
+        dixon_coles_weights=[0.5],
+        elo_prior_weights=[0.2],
+        shot_adjustment_weights=[0.2],
+    )
+    repo = DuckRepository(str(tmp_path / "history.duckdb"))
+    sweep_a, summary_a, ranking_a = run_experiment_sweep(sample_matches, elo_history, cfg, req)
+    persist_sweep_results(repo, sweep_a, summary_a, ranking_a)
+    sweep_b, summary_b, ranking_b = run_experiment_sweep(sample_matches, elo_history, cfg, req)
+    persist_sweep_results(repo, sweep_b, summary_b, ranking_b)
+
+    selected = repo.read_df(f"select * from experiment_champion_view where sweep_id = '{sweep_a}'")
+    latest = repo.read_df("select sweep_id from experiment_sweep_metadata order by created_at desc limit 1")
+    repo.close()
+
+    assert selected.height >= 1
+    assert latest.height == 1

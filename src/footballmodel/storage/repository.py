@@ -25,3 +25,21 @@ class DuckRepository:
 
     def read_df(self, query: str) -> pl.DataFrame:
         return pl.from_arrow(self.con.execute(query).arrow())
+
+    def upsert_benchmark_snapshots(self, df: pl.DataFrame) -> None:
+        if df.is_empty():
+            return
+        self.con.register("tmp_df", df.to_arrow())
+        self.con.execute("create table if not exists benchmark_snapshots as select * from tmp_df where 1=0")
+        self.con.execute(
+            """
+            delete from benchmark_snapshots as tgt
+            using tmp_df as src
+            where tgt.fixture_id = src.fixture_id
+              and tgt.market = src.market
+              and tgt.outcome = src.outcome
+              and tgt.snapshot_type = src.snapshot_type
+              and tgt.line is not distinct from src.line
+            """
+        )
+        self.con.execute("insert into benchmark_snapshots select * from tmp_df")

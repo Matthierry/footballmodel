@@ -62,6 +62,9 @@ class FakeStreamlit:
     def button(self, *_args, **_kwargs):
         return False
 
+    def selectbox(self, _label, options, index=0, **_kwargs):
+        return options[index] if options else None
+
     def success(self, *_args, **_kwargs):
         return None
 
@@ -114,6 +117,8 @@ class FakeRepo:
             )
         if "experiment_rankings" in _query:
             return pl.DataFrame({"sweep_id": ["sw_1"], "created_at": ["2026-01-01T00:00:00"]})
+        if "experiment_sweep_metadata" in _query:
+            return pl.DataFrame({"sweep_id": ["sw_1"], "created_at": ["2026-01-01T00:00:00"], "run_count": [1]})
         if "experiment_champion_view" in _query:
             return pl.DataFrame({"sweep_id": ["sw_1"], "run_id": ["bt_1"], "selection_role": ["champion"], "ranking_score": [1111]})
         if "experiment_calibration_buckets" in _query:
@@ -133,6 +138,19 @@ class FakeRepo:
             return pl.DataFrame({"sweep_id": ["sw_1"], "run_id": ["bt_1"], "market": ["1X2"], "league": ["ENG1"], "bets": [4]})
         if "experiment_false_positive_zones" in _query:
             return pl.DataFrame({"sweep_id": ["sw_1"], "run_id": ["bt_1"], "false_positives": [2]})
+        if "benchmark_snapshots" in _query:
+            return pl.DataFrame(
+                {
+                    "fixture_id": ["f1"],
+                    "market": ["1X2"],
+                    "outcome": ["home"],
+                    "line": [None],
+                    "benchmark_price": [2.1],
+                    "benchmark_source": ["exchange"],
+                    "snapshot_type": ["prediction_time"],
+                    "snapshot_timestamp_utc": ["2026-01-01T00:00:00"],
+                }
+            )
         return pl.DataFrame(
             {
                 "fixture_id": ["f1"],

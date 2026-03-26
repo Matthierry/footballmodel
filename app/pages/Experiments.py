@@ -137,46 +137,75 @@ if selected:
         st.dataframe(sorted_segments.tail(10))
 
 try:
-    latest_sweep = repo.read_df("select sweep_id from experiment_rankings order by created_at desc limit 1")
+    sweep_meta = repo.read_df("select * from experiment_sweep_metadata order by created_at desc")
 except Exception:
-    latest_sweep = pl.DataFrame([])
-if not latest_sweep.is_empty():
-    latest_sweep_id = latest_sweep["sweep_id"][0]
-    st.subheader("Persisted diagnostics (latest sweep)")
-    st.caption(f"Sweep: {latest_sweep_id}")
+    try:
+        sweep_meta = repo.read_df(
+            "select sweep_id, max(created_at) as created_at, count(*) as run_count from experiment_rankings group by sweep_id order by created_at desc"
+        )
+    except Exception:
+        sweep_meta = pl.DataFrame([])
+
+if not sweep_meta.is_empty():
+    st.subheader("Historical sweep review")
+    sweep_options = sweep_meta["sweep_id"].to_list()
+    default_idx = 0 if sweep_options else None
+    selected_sweep_id = st.selectbox("Select sweep ID", options=sweep_options, index=default_idx)
+
+    st.markdown("**Sweep metadata**")
+    st.dataframe(sweep_meta.filter(pl.col("sweep_id") == selected_sweep_id))
+
+    compare_ids = st.multiselect(
+        "Compare sweeps (summary level)",
+        options=sweep_options,
+        default=sweep_options[:2] if len(sweep_options) > 1 else sweep_options[:1],
+    )
+    if compare_ids:
+        compare_clause = ",".join(f"'{x}'" for x in compare_ids)
+        compare = repo.read_df(
+            f"""
+            select sweep_id, run_id, ranking_score, calibrated_log_loss, calibrated_brier_score,
+                   calibrated_calibration_error, avg_clv, robustness_score, flat_stake_roi
+            from experiment_rankings
+            where sweep_id in ({compare_clause})
+            order by sweep_id, ranking_score
+            """
+        )
+        st.markdown("**Sweep comparison (ranked outcomes)**")
+        st.dataframe(compare)
 
     champion = repo.read_df(
-        f"select * from experiment_champion_view where sweep_id = '{latest_sweep_id}' order by selection_role, ranking_score"
+        f"select * from experiment_champion_view where sweep_id = '{selected_sweep_id}' order by selection_role, ranking_score"
     )
-    st.markdown("**Default-model recommendation**")
+    st.markdown("**Champion + challengers**")
     st.dataframe(champion)
 
     calib_buckets = repo.read_df(
         f"""
         select * from experiment_calibration_buckets
-        where sweep_id = '{latest_sweep_id}'
+        where sweep_id = '{selected_sweep_id}'
         order by run_id, market, league, probability_bucket
         """
     )
-    st.markdown("**Calibration buckets (auditable)**")
+    st.markdown("**Calibration buckets (selected sweep)**")
     st.dataframe(calib_buckets)
 
     clv_seg = repo.read_df(
-        f"select * from experiment_clv_segments where sweep_id = '{latest_sweep_id}' order by run_id, market, league"
+        f"select * from experiment_clv_segments where sweep_id = '{selected_sweep_id}' order by run_id, market, league"
     )
-    st.markdown("**CLV by market/league**")
+    st.markdown("**CLV by market/league (selected sweep)**")
     st.dataframe(clv_seg)
 
     value_hit = repo.read_df(
-        f"select * from experiment_value_flag_hit_rate where sweep_id = '{latest_sweep_id}' order by run_id, bets desc"
+        f"select * from experiment_value_flag_hit_rate where sweep_id = '{selected_sweep_id}' order by run_id, bets desc"
     )
-    st.markdown("**Value-flag hit rate**")
+    st.markdown("**Value-flag hit rate (selected sweep)**")
     st.dataframe(value_hit)
 
     false_pos = repo.read_df(
-        f"select * from experiment_false_positive_zones where sweep_id = '{latest_sweep_id}' order by false_positives desc limit 100"
+        f"select * from experiment_false_positive_zones where sweep_id = '{selected_sweep_id}' order by false_positives desc limit 100"
     )
-    st.markdown("**False-positive concentration zones**")
+    st.markdown("**False-positive concentration zones (selected sweep)**")
     st.dataframe(false_pos)
 
 repo.close()
