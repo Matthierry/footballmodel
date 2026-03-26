@@ -50,6 +50,28 @@ def derive_ah(matrix: np.ndarray, lines: tuple[float, ...] = (-1.5, -1.0, -0.5, 
     return goal_diff_probs
 
 
+def _ah_outcome_probabilities(matrix: np.ndarray, line: float) -> dict[str, float]:
+    home_win = 0.0
+    away_win = 0.0
+    push = 0.0
+
+    for h in range(matrix.shape[0]):
+        for a in range(matrix.shape[1]):
+            adjusted = (h - a) - line
+            if adjusted > 0:
+                home_win += matrix[h, a]
+            elif adjusted < 0:
+                away_win += matrix[h, a]
+            else:
+                push += matrix[h, a]
+
+    return {
+        "home_win": float(home_win),
+        "away_win": float(away_win),
+        "push": float(push),
+    }
+
+
 def matrix_to_market_table(fixture_id: str, matrix: np.ndarray) -> pl.DataFrame:
     rows: list[dict[str, object]] = []
     for market, probs in {
@@ -67,4 +89,25 @@ def matrix_to_market_table(fixture_id: str, matrix: np.ndarray) -> pl.DataFrame:
                     "model_fair_odds": 1 / p if p > 0 else None,
                 }
             )
+
+    ah = derive_ah(matrix)
+    ah_line = float(ah["recommended_line"])
+    ah_probs = _ah_outcome_probabilities(matrix, ah_line)
+    non_push_mass = 1.0 - ah_probs["push"]
+
+    for side in ("home", "away"):
+        win_prob = ah_probs[f"{side}_win"]
+        normalized_prob = win_prob / non_push_mass if non_push_mass > 0 else 0.0
+        rows.append(
+            {
+                "fixture_id": fixture_id,
+                "market": "AH",
+                "outcome": f"{side}_{ah_line:+.1f}",
+                "model_probability": float(normalized_prob),
+                "model_fair_odds": (non_push_mass / win_prob) if win_prob > 0 else None,
+                "market_line": ah_line,
+                "push_probability": ah_probs["push"],
+            }
+        )
+
     return pl.DataFrame(rows)

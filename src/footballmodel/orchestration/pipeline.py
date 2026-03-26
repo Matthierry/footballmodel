@@ -6,6 +6,7 @@ import polars as pl
 
 from footballmodel.config.settings import AppConfig
 from footballmodel.ingestion.clubelo import elo_as_of
+from footballmodel.markets.benchmark import resolve_benchmark_price
 from footballmodel.markets.derivation import derive_ah, derive_correct_score_top5, matrix_to_market_table
 from footballmodel.markets.value import attach_value_flags
 from footballmodel.model.blending import SubModelSignal, blend_signals, elo_to_goal_prior
@@ -36,15 +37,19 @@ def run_fixture_prediction(history: pl.DataFrame, fixture: dict, elo_history: pl
     matrix = engine.score_matrix(GoalModelInputs(home_xg=blended.home_xg, away_xg=blended.away_xg))
 
     market_df = matrix_to_market_table(fixture["fixture_id"], matrix)
-    market_df = market_df.with_columns(
-        pl.when(pl.col("outcome").str.contains("home")).then(pl.lit(fixture.get("bf_home_odds") or fixture.get("avg_home_odds")))
-        .when(pl.col("outcome").str.contains("draw")).then(pl.lit(fixture.get("bf_draw_odds") or fixture.get("avg_draw_odds")))
-        .when(pl.col("outcome").str.contains("away")).then(pl.lit(fixture.get("bf_away_odds") or fixture.get("avg_away_odds")))
-        .otherwise(pl.lit(None))
-        .alias("current_price")
-    )
 
-    market_df = attach_value_flags(market_df, cfg.runtime.value_edge_threshold, cfg.runtime.credibility_threshold)
+    market_rows = []
+    for row in market_df.to_dicts():
+        benchmark = resolve_benchmark_price(fixture, market=str(row["market"]), outcome=str(row["outcome"]))
+        row["current_price"] = benchmark.current_price
+        row["benchmark_source"] = benchmark.benchmark_source
+        market_rows.append(row)
+
+    market_df = attach_value_flags(
+        pl.DataFrame(market_rows),
+        cfg.runtime.value_edge_threshold,
+        cfg.runtime.credibility_threshold,
+    )
 
     return {
         "fixture_id": fixture["fixture_id"],

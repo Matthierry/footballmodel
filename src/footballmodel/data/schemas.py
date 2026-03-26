@@ -23,3 +23,16 @@ class FixtureRecord:
     bf_home_odds: float | None = None
     bf_draw_odds: float | None = None
     bf_away_odds: float | None = None
+    avg_over_2_5_odds: float | None = None
+    avg_under_2_5_odds: float | None = None
+    bf_over_2_5_odds: float | None = None
+    bf_under_2_5_odds: float | None = None
+    avg_btts_yes_odds: float | None = None
+    avg_btts_no_odds: float | None = None
+    bf_btts_yes_odds: float | None = None
+    bf_btts_no_odds: float | None = None
+    ah_line: float | None = None
+    avg_ah_home_odds: float | None = None
+    avg_ah_away_odds: float | None = None
+    bf_ah_home_odds: float | None = None
+    bf_ah_away_odds: float | None = None
