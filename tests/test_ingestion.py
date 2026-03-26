@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-pl = pytest.importorskip("polars")
+import polars as pl
 
 from footballmodel.ingestion.clubelo import elo_as_of, load_clubelo_csv
 from footballmodel.ingestion.football_data import FOOTBALL_DATA_MAPPING, load_football_data_csv

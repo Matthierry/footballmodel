@@ -33,7 +33,7 @@ def clubelo_csv(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def sample_matches():
-    pl = pytest.importorskip("polars")
+    import polars as pl
     return pl.DataFrame(
         {
             "fixture_id": ["f1", "f2", "f3", "f4"],
@@ -57,7 +57,7 @@ def sample_matches():
 
 @pytest.fixture
 def deterministic_matrix():
-    np = pytest.importorskip("numpy")
+    import numpy as np
     matrix = np.zeros((3, 3), dtype=float)
     matrix[0, 0] = 0.20
     matrix[1, 0] = 0.15

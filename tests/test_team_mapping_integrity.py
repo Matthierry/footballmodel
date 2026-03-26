@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+import polars as pl
 import pytest
-
-pl = pytest.importorskip("polars")
 
 from footballmodel.ingestion.team_mapping import (
     TeamMappingError,
