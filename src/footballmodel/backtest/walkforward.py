@@ -9,6 +9,12 @@ from uuid import uuid4
 import polars as pl
 
 from footballmodel.config.settings import AppConfig
+from footballmodel.markets.benchmark_snapshots import (
+    SNAPSHOT_TYPE_CLOSING_SURROGATE,
+    SNAPSHOT_TYPE_PREDICTION_TIME,
+    benchmark_snapshot_rows_from_fixture,
+    choose_later_snapshot,
+)
 from footballmodel.orchestration.pipeline import run_fixture_prediction
 from footballmodel.storage.repository import DuckRepository
 
@@ -67,6 +73,52 @@ def _close_price(fixture: dict, market: str, outcome: str) -> float | None:
     if market == "AH":
         return _val("avg_ah_home_odds" if outcome.startswith("home_") else "avg_ah_away_odds")
     return None
+
+
+def _line_for_market_outcome(market: str, outcome: str) -> float | None:
+    if market == "OU25":
+        return 2.5
+    if market == "AH":
+        try:
+            return float(outcome.split("_", maxsplit=1)[1])
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _build_row_snapshot_index(
+    fixture: dict,
+    market_row: dict[str, object],
+    run_timestamp: str,
+) -> pl.DataFrame:
+    market = str(market_row["market"])
+    outcome = str(market_row["outcome"])
+    line = _line_for_market_outcome(market, outcome)
+    pred_snapshot = pl.DataFrame(
+        [
+            {
+                "fixture_id": fixture["fixture_id"],
+                "market": market,
+                "outcome": outcome,
+                "line": line,
+                "benchmark_price": market_row.get("current_price"),
+                "benchmark_source": market_row.get("benchmark_source"),
+                "snapshot_type": SNAPSHOT_TYPE_PREDICTION_TIME,
+                "snapshot_timestamp_utc": run_timestamp,
+            }
+        ]
+    ).with_columns(pl.col("line").cast(pl.Float64))
+    surrogate_rows = benchmark_snapshot_rows_from_fixture(
+        fixture=fixture,
+        snapshot_type=SNAPSHOT_TYPE_CLOSING_SURROGATE,
+        snapshot_timestamp_utc=run_timestamp,
+    )
+    surrogate = surrogate_rows.select(pred_snapshot.columns).with_columns(pl.col("line").cast(pl.Float64)).filter(
+        (pl.col("market") == market)
+        & (pl.col("outcome") == outcome)
+        & (pl.col("line").is_null() if line is None else pl.col("line") == line)
+    )
+    return pl.concat([pred_snapshot, surrogate]) if not surrogate.is_empty() else pred_snapshot
 
 
 def _actual_target(fixture: dict, market: str, outcome: str) -> tuple[int | None, bool]:
@@ -230,9 +282,14 @@ def run_backtest(matches: pl.DataFrame, elo_history: pl.DataFrame, cfg: AppConfi
         pred = run_fixture_prediction(history, fixture, elo_history, run_cfg)
         for market_row in pred["markets"]:
             target, is_push = _actual_target(fixture, str(market_row["market"]), str(market_row["outcome"]))
-            close_price = _close_price(fixture, str(market_row["market"]), str(market_row["outcome"]))
-            current = market_row.get("current_price")
-            clv = (1 / current - 1 / close_price) if (current and close_price) else None
+            snapshot_index = _build_row_snapshot_index(fixture, market_row, datetime.utcnow().isoformat())
+            prediction_snapshot = snapshot_index.filter(pl.col("snapshot_type") == SNAPSHOT_TYPE_PREDICTION_TIME)
+            prediction_snapshot_row = prediction_snapshot.row(0, named=True) if not prediction_snapshot.is_empty() else None
+            later_snapshot_row = choose_later_snapshot(snapshot_index)
+
+            current = prediction_snapshot_row["benchmark_price"] if prediction_snapshot_row else None
+            close_price = later_snapshot_row["benchmark_price"] if later_snapshot_row else None
+            clv = (1 / current - 1 / close_price) if (current is not None and close_price is not None) else None
             beat_close = clv is not None and clv > 0
 
             raw_probability = float(market_row["model_probability"])
@@ -283,7 +340,14 @@ def run_backtest(matches: pl.DataFrame, elo_history: pl.DataFrame, cfg: AppConfi
                     "calibration_method": calibration_method,
                     "current_price": current,
                     "close_price": close_price,
-                    "benchmark_source": market_row.get("benchmark_source"),
+                    "benchmark_source": prediction_snapshot_row.get("benchmark_source") if prediction_snapshot_row else "unavailable",
+                    "prediction_snapshot_type": SNAPSHOT_TYPE_PREDICTION_TIME,
+                    "prediction_snapshot_timestamp_utc": prediction_snapshot_row.get("snapshot_timestamp_utc")
+                    if prediction_snapshot_row
+                    else None,
+                    "later_snapshot_type": later_snapshot_row.get("snapshot_type") if later_snapshot_row else None,
+                    "later_snapshot_source": later_snapshot_row.get("benchmark_source") if later_snapshot_row else "unavailable",
+                    "later_snapshot_timestamp_utc": later_snapshot_row.get("snapshot_timestamp_utc") if later_snapshot_row else None,
                     "benchmark_available": bool(market_row.get("benchmark_available")),
                     "edge": market_row.get("edge"),
                     "calibrated_edge": cal_edge,
@@ -656,6 +720,7 @@ def run_experiment_sweep(
         for key, frames in diagnostics.items()
     }
     run_experiment_sweep.last_champion_view = build_champion_view(ranking)
+    run_experiment_sweep.last_sweep_metadata = build_sweep_metadata(sweep_id, request, summary.height)
     return sweep_id, summary, ranking
 
 
@@ -710,3 +775,31 @@ def persist_sweep_results(repo: DuckRepository, sweep_id: str, summary: pl.DataF
             frame = diagnostics.get(key, pl.DataFrame([]))
             if isinstance(frame, pl.DataFrame) and not frame.is_empty():
                 repo.append_df(table, frame.with_columns(pl.lit(sweep_id).alias("sweep_id")))
+    metadata = getattr(run_experiment_sweep, "last_sweep_metadata", pl.DataFrame([]))
+    if isinstance(metadata, pl.DataFrame) and not metadata.is_empty():
+        repo.append_df("experiment_sweep_metadata", metadata.with_columns(pl.lit(sweep_id).alias("sweep_id")))
+
+
+def build_sweep_metadata(sweep_id: str, request: SweepRequest, run_count: int) -> pl.DataFrame:
+    return pl.DataFrame(
+        [
+            {
+                "sweep_id": sweep_id,
+                "created_at": datetime.utcnow().isoformat(),
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "leagues": ",".join(request.leagues),
+                "seasons": ",".join(request.seasons or []),
+                "run_count": run_count,
+                "ranking_method_version": "predictive_first_v1",
+                "dixon_coles_weights": ",".join(str(v) for v in (request.dixon_coles_weights or [])),
+                "elo_prior_weights": ",".join(str(v) for v in (request.elo_prior_weights or [])),
+                "shot_adjustment_weights": ",".join(str(v) for v in (request.shot_adjustment_weights or [])),
+                "value_edge_thresholds": ",".join(str(v) for v in (request.value_edge_thresholds or [])),
+                "credibility_thresholds": ",".join(str(v) for v in (request.credibility_thresholds or [])),
+                "lookback_days_options": ",".join(str(v) for v in (request.lookback_days_options or [])),
+                "half_life_days_options": ",".join(str(v) for v in (request.half_life_days_options or [])),
+                "summary_note": "Auto-generated sweep metadata",
+            }
+        ]
+    )

@@ -37,4 +37,4 @@ def resolve_benchmark_price(fixture: dict, market: str, outcome: str) -> Benchma
         value = fixture.get(column)
         if value is not None:
             return BenchmarkSelection(current_price=float(value), benchmark_source=source)
-    return BenchmarkSelection(current_price=None, benchmark_source=None)
+    return BenchmarkSelection(current_price=None, benchmark_source="unavailable")

@@ -8,6 +8,11 @@ import polars as pl
 from footballmodel.config.settings import AppConfig
 from footballmodel.ingestion.clubelo import elo_as_of
 from footballmodel.markets.benchmark import resolve_benchmark_price
+from footballmodel.markets.benchmark_snapshots import (
+    SNAPSHOT_TYPE_PREDICTION_TIME,
+    SNAPSHOT_TYPE_PRE_KICKOFF_LATEST,
+    benchmark_snapshot_rows_from_fixture,
+)
 from footballmodel.markets.derivation import derive_ah, derive_correct_score_top5, matrix_to_market_table
 from footballmodel.markets.value import attach_value_flags
 from footballmodel.model.blending import SubModelSignal, blend_signals, elo_to_goal_prior
@@ -111,11 +116,14 @@ def run_fixture_prediction(history: pl.DataFrame, fixture: dict, elo_history: pl
 
     market_df = matrix_to_market_table(fixture["fixture_id"], matrix)
 
+    prediction_timestamp = datetime.utcnow().isoformat()
     market_rows = []
     for row in market_df.to_dicts():
         benchmark = resolve_benchmark_price(fixture, market=str(row["market"]), outcome=str(row["outcome"]))
         row["current_price"] = benchmark.current_price
         row["benchmark_source"] = benchmark.benchmark_source
+        row["benchmark_snapshot_type"] = SNAPSHOT_TYPE_PREDICTION_TIME
+        row["benchmark_snapshot_timestamp_utc"] = prediction_timestamp
         market_rows.append(row)
 
     market_df = attach_value_flags(
@@ -126,7 +134,7 @@ def run_fixture_prediction(history: pl.DataFrame, fixture: dict, elo_history: pl
 
     return {
         "fixture_id": fixture["fixture_id"],
-        "timestamp_utc": datetime.utcnow().isoformat(),
+        "timestamp_utc": prediction_timestamp,
         "home_team": fixture["home_team"],
         "away_team": fixture["away_team"],
         "expected_home_goals": blended.home_xg,
@@ -136,3 +144,25 @@ def run_fixture_prediction(history: pl.DataFrame, fixture: dict, elo_history: pl
         "correct_score_top5": derive_correct_score_top5(matrix),
         "asian_handicap": derive_ah(matrix),
     }
+
+
+def build_prediction_time_benchmark_snapshots(fixture: dict, prediction_timestamp_utc: str | None = None) -> pl.DataFrame:
+    return benchmark_snapshot_rows_from_fixture(
+        fixture=fixture,
+        snapshot_type=SNAPSHOT_TYPE_PREDICTION_TIME,
+        snapshot_timestamp_utc=prediction_timestamp_utc,
+    )
+
+
+def build_pre_kickoff_benchmark_snapshots(fixtures: pl.DataFrame, snapshot_timestamp_utc: str | None = None) -> pl.DataFrame:
+    rows = [
+        benchmark_snapshot_rows_from_fixture(
+            fixture=fixture,
+            snapshot_type=SNAPSHOT_TYPE_PRE_KICKOFF_LATEST,
+            snapshot_timestamp_utc=snapshot_timestamp_utc,
+        )
+        for fixture in fixtures.iter_rows(named=True)
+    ]
+    if not rows:
+        return pl.DataFrame([])
+    return pl.concat(rows)
