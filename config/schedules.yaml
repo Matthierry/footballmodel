@@ -1,0 +1,5 @@
+automation:
+  timezone: Europe/London
+  daily_runs:
+    - "16:00"
+    - "19:00"

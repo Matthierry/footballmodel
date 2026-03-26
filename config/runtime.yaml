@@ -1,0 +1,27 @@
+leagues:
+  - ENG1
+  - ENG2
+  - GER1
+  - GER2
+  - ESP1
+  - ESP2
+  - FRA1
+  - FRA2
+  - ITA1
+  - ITA2
+  - POR1
+  - NED1
+weights:
+  dixon_coles: 0.60
+  elo_prior: 0.25
+  shot_adjustment: 0.15
+half_life:
+  team_form_days: 60
+  league_prior_days: 365
+lookback:
+  team_form_days: 180
+  league_prior_seasons: 3
+runtime:
+  value_edge_threshold: 0.025
+  credibility_threshold: 0.55
+  max_goals: 6

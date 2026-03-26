@@ -1,0 +1,6 @@
+value:
+  min_edge: 0.025
+  min_credibility: 0.55
+  edge_bands: [0.025, 0.05, 0.1]
+backtest:
+  flat_stake_units: 1

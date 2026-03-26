@@ -1,0 +1,37 @@
+name: footballmodel-pipeline
+
+on:
+  schedule:
+    - cron: "0 16 * * *"
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+jobs:
+  run-model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[test]
+      - name: Run automation
+        run: ./scripts/automation_run.sh
+      - name: Keep last good data on failure
+        if: failure()
+        run: echo "Failure detected. Existing data retained by design."
+      - name: Email alert
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "footballmodel pipeline failed"
+          to: statmatt14@gmail.com
+          from: footballmodel-bot@localhost
+          body: "Scheduled run failed. Check GitHub Actions logs."
