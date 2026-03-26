@@ -131,3 +131,49 @@ def build_live_review_rows(
         )
 
     return pl.DataFrame(rows)
+
+
+def build_live_run_summary(
+    run_predictions: pl.DataFrame,
+    run_market_predictions: pl.DataFrame,
+    run_review_rows: pl.DataFrame,
+) -> pl.DataFrame:
+    if run_predictions.is_empty():
+        return pl.DataFrame([])
+
+    run_meta = run_predictions.row(0, named=True)
+    settled = run_review_rows.filter(pl.col("settlement_status") == "settled") if not run_review_rows.is_empty() else pl.DataFrame([])
+    value_rows = settled.filter(pl.col("value_flag") == True) if not settled.is_empty() else pl.DataFrame([])
+    with_clv = settled.filter(pl.col("clv").is_not_null()) if not settled.is_empty() else pl.DataFrame([])
+
+    value_hit_rate = (
+        value_rows.filter(pl.col("result_status") == "won").height / value_rows.height
+        if value_rows.height
+        else None
+    )
+
+    return pl.DataFrame(
+        [
+            {
+                "live_run_id": run_meta.get("live_run_id"),
+                "run_timestamp_utc": run_meta.get("run_timestamp_utc"),
+                "config_name": run_meta.get("config_name"),
+                "config_version": run_meta.get("config_version"),
+                "fixtures_scored": run_predictions.height,
+                "market_predictions": run_market_predictions.height,
+                "review_rows": run_review_rows.height,
+                "pending_rows": run_review_rows.filter(pl.col("settlement_status") == "pending").height if not run_review_rows.is_empty() else 0,
+                "settled_rows": settled.height,
+                "value_rows": run_review_rows.filter(pl.col("value_flag") == True).height if not run_review_rows.is_empty() else 0,
+                "settled_value_rows": value_rows.height,
+                "value_hit_rate": value_hit_rate,
+                "avg_clv": float(with_clv["clv"].mean()) if with_clv.height else None,
+                "benchmark_coverage_rate": (
+                    run_review_rows.filter(pl.col("later_benchmark_price").is_not_null()).height / run_review_rows.height
+                    if run_review_rows.height
+                    else None
+                ),
+                "summary_created_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
+    )

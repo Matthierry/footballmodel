@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 import streamlit as st
@@ -16,8 +16,8 @@ st.caption(f"Default scheduled config: **{active_name}** (version **{active_cfg.
 
 repo = DuckRepository()
 try:
-    review = repo.read_df("select * from live_model_review order by run_timestamp_utc desc")
-    runs = repo.read_df("select * from model_runs order by run_timestamp_utc desc")
+    review = repo.read_df("select * from live_review_history order by run_timestamp_utc desc")
+    runs = repo.read_df("select * from live_run_summaries_history order by run_timestamp_utc desc")
 except Exception:
     review = pl.DataFrame([])
     runs = pl.DataFrame([])
@@ -25,9 +25,10 @@ except Exception:
 if review.is_empty():
     st.info("No live monitoring rows yet. Run the pipeline to populate live_model_review.")
 else:
-    for col in ("match_date",):
+    for col in ("match_date", "run_timestamp_utc"):
         if col in review.columns:
-            review = review.with_columns(pl.col(col).cast(pl.Date, strict=False))
+            cast_type = pl.Date if col == "match_date" else pl.Datetime
+            review = review.with_columns(pl.col(col).cast(cast_type, strict=False))
 
     min_day = review["match_date"].min() or date.today()
     max_day = review["match_date"].max() or date.today()
@@ -41,7 +42,7 @@ else:
         benchmark_sources = sorted([x for x in review["prediction_benchmark_source"].drop_nulls().unique().to_list()])
         selected_sources = st.multiselect("Benchmark source", options=benchmark_sources, default=benchmark_sources)
 
-    f1, f2, f3, f4 = st.columns(4)
+    f1, f2, f3, f4, f5 = st.columns(5)
     with f1:
         leagues = sorted(review["league"].drop_nulls().unique().to_list())
         selected_leagues = st.multiselect("League", options=leagues, default=leagues)
@@ -49,8 +50,11 @@ else:
         markets = sorted(review["market"].drop_nulls().unique().to_list())
         selected_markets = st.multiselect("Market", options=markets, default=markets)
     with f3:
-        settlement = st.selectbox("Settlement", options=["all", "pending", "settled"], index=0)
+        config_versions = sorted(review["config_version"].drop_nulls().unique().to_list())
+        selected_versions = st.multiselect("Config version", options=config_versions, default=config_versions)
     with f4:
+        settlement = st.selectbox("Settlement", options=["all", "pending", "settled"], index=0)
+    with f5:
         value_mode = st.selectbox("Value filter", options=["all", "value", "non_value"], index=0)
 
     filtered = review.filter((pl.col("match_date") >= pl.lit(from_day)) & (pl.col("match_date") <= pl.lit(to_day)))
@@ -60,6 +64,8 @@ else:
         filtered = filtered.filter(pl.col("league").is_in(selected_leagues))
     if selected_markets:
         filtered = filtered.filter(pl.col("market").is_in(selected_markets))
+    if selected_versions:
+        filtered = filtered.filter(pl.col("config_version").is_in(selected_versions))
     if settlement != "all":
         filtered = filtered.filter(pl.col("settlement_status") == settlement)
     if value_mode == "value":
@@ -94,17 +100,75 @@ else:
     s1.metric("Recent avg CLV", round(float(recent_clv["clv"].mean()), 4) if recent_clv.height else 0.0)
     s2.metric("Recent value-flag hit rate", round(value_hit_rate, 4))
 
-    st.subheader("Strongest / weakest leagues and markets")
+    st.subheader("7-day / 14-day / 30-day summary")
+    if "run_timestamp_utc" in filtered.columns:
+        as_of = filtered["run_timestamp_utc"].max()
+        window_rows = []
+        for days in (7, 14, 30):
+            since = as_of - timedelta(days=days)
+            scoped = filtered.filter(pl.col("run_timestamp_utc") >= since)
+            settled_scoped = scoped.filter(pl.col("settlement_status") == "settled")
+            value_scoped = settled_scoped.filter(pl.col("value_flag") == True)
+            window_rows.append(
+                {
+                    "window_days": days,
+                    "rows": scoped.height,
+                    "settled_rows": settled_scoped.height,
+                    "avg_clv": float(settled_scoped["clv"].mean()) if settled_scoped.height else None,
+                    "value_hit_rate": (
+                        value_scoped.filter(pl.col("result_status") == "won").height / value_scoped.height
+                        if value_scoped.height
+                        else None
+                    ),
+                    "benchmark_coverage": (
+                        scoped.filter(pl.col("later_benchmark_price").is_not_null()).height / scoped.height
+                        if scoped.height
+                        else None
+                    ),
+                }
+            )
+        st.dataframe(pl.DataFrame(window_rows))
+
+    st.subheader("CLV trend over time")
+    clv_trend = (
+        filtered.filter(pl.col("settlement_status") == "settled")
+        .filter(pl.col("clv").is_not_null())
+        .with_columns(pl.col("run_timestamp_utc").dt.date().alias("run_day"))
+        .group_by("run_day")
+        .agg(pl.len().alias("rows"), pl.col("clv").mean().alias("avg_clv"))
+        .sort("run_day")
+    )
+    st.dataframe(clv_trend)
+
+    st.subheader("Value-flag hit-rate trend")
+    value_trend = (
+        filtered.filter(pl.col("settlement_status") == "settled")
+        .filter(pl.col("value_flag") == True)
+        .with_columns(pl.col("run_timestamp_utc").dt.date().alias("run_day"))
+        .group_by("run_day")
+        .agg(
+            pl.len().alias("value_rows"),
+            (pl.col("result_status") == "won").sum().alias("wins"),
+        )
+        .with_columns((pl.col("wins") / pl.col("value_rows")).alias("value_hit_rate"))
+        .sort("run_day")
+    )
+    st.dataframe(value_trend)
+
+    st.subheader("Strongest / weakest leagues and markets over time")
     perf = (
         settled.filter(pl.col("clv").is_not_null())
-        .group_by(["league", "market"])
+        .with_columns(pl.col("run_timestamp_utc").dt.date().alias("run_day"))
+        .group_by(["run_day", "league", "market"])
         .agg(pl.col("clv").mean().alias("avg_clv"), pl.len().alias("samples"))
         .sort("avg_clv", descending=True)
     )
     st.dataframe(perf)
 
-    st.subheader("Benchmark snapshot coverage / missingness")
-    coverage = filtered.group_by("prediction_benchmark_source").agg(
+    st.subheader("Benchmark coverage trend")
+    coverage = filtered.with_columns(pl.col("run_timestamp_utc").dt.date().alias("run_day")).group_by(
+        ["run_day", "prediction_benchmark_source"]
+    ).agg(
         pl.len().alias("rows"),
         pl.col("later_benchmark_price").is_not_null().sum().alias("has_later_snapshot"),
         pl.col("later_benchmark_price").is_null().sum().alias("missing_later_snapshot"),
@@ -118,6 +182,20 @@ else:
         pl.col("later_benchmark_price").is_null().sum().alias("missing_later_price"),
     )
     st.dataframe(health)
+
+    st.subheader("Config-version comparison over time")
+    config_compare = (
+        filtered.with_columns(pl.col("run_timestamp_utc").dt.date().alias("run_day"))
+        .group_by(["run_day", "config_name", "config_version"])
+        .agg(
+            pl.len().alias("rows"),
+            pl.col("clv").mean().alias("avg_clv"),
+            (pl.col("value_flag") == True).sum().alias("value_rows"),
+            pl.col("later_benchmark_price").is_not_null().sum().alias("rows_with_later_snapshot"),
+        )
+        .sort(["run_day", "config_name", "config_version"])
+    )
+    st.dataframe(config_compare)
 
     st.subheader("Filtered live review rows")
     st.dataframe(filtered)
