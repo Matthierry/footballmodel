@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import pytest
-
-np = pytest.importorskip("numpy")
+import numpy as np
 
 from footballmodel.markets.derivation import derive_1x2, derive_ah, derive_btts, derive_correct_score_top5, derive_ou25
 

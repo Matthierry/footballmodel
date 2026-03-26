@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
-
-pl = pytest.importorskip("polars")
-pytest.importorskip("numpy")
-pytest.importorskip("scipy")
+import polars as pl
 
 from footballmodel.backtest.walkforward import BacktestRequest, run_walkforward
 from footballmodel.config.settings import load_app_config

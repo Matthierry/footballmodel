@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import pytest
-
-np = pytest.importorskip("numpy")
-pytest.importorskip("scipy")
+import numpy as np
 
 from footballmodel.model.score_engine import GoalModelInputs, UnifiedScoreEngine
 
