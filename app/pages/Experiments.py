@@ -5,7 +5,13 @@ from datetime import date
 import polars as pl
 import streamlit as st
 
-from footballmodel.backtest.walkforward import SweepRequest, persist_sweep_results, rank_experiment_runs, run_experiment_sweep
+from footballmodel.backtest.walkforward import (
+    SweepRequest,
+    build_champion_view,
+    persist_sweep_results,
+    rank_experiment_runs,
+    run_experiment_sweep,
+)
 from footballmodel.config.settings import load_app_config
 from footballmodel.storage.repository import DuckRepository
 
@@ -69,6 +75,8 @@ if not matches.is_empty() and not elo_history.is_empty():
         st.success(f"Sweep complete: {sweep_id} ({summary.height} runs)")
         if not ranking.is_empty():
             st.dataframe(ranking)
+            st.subheader("Champion vs challengers")
+            st.dataframe(build_champion_view(ranking))
 
 if runs.is_empty():
     st.info("No experiment runs yet. Use Backtest Lab to create one.")
@@ -84,6 +92,7 @@ if selected:
     st.dataframe(metrics)
 
     summary = metrics.filter((metrics["breakdown"] == "overall") & (metrics["group_key"] == "all"))
+    ranked = pl.DataFrame([])
     if not summary.is_empty():
         ranked = rank_experiment_runs(summary)
         st.subheader("Overall comparison (predictive-first ranking)")
@@ -97,6 +106,7 @@ if selected:
             "raw_calibration_error",
             "calibrated_calibration_error",
             "avg_clv",
+            "robustness_score",
             "median_clv",
             "share_beating_close",
             "flat_stake_roi",
@@ -108,10 +118,65 @@ if selected:
         st.subheader("Best and worst runs")
         st.dataframe(pl.concat([ranked.head(3), ranked.tail(3)]))
 
-    st.subheader("Calibration by market")
+    st.subheader("Champion vs challengers")
+    st.dataframe(build_champion_view(ranked) if not summary.is_empty() else pl.DataFrame([]))
+
+    st.subheader("Raw vs calibrated by market")
     st.dataframe(metrics.filter(pl.col("breakdown") == "market"))
 
-    st.subheader("Calibration by league")
+    st.subheader("Raw vs calibrated by league")
     st.dataframe(metrics.filter(pl.col("breakdown") == "league"))
+
+    st.subheader("Strongest and weakest segments")
+    segment_view = metrics.filter(pl.col("breakdown").is_in(["league", "market", "edge_bucket", "benchmark_source"]))
+    if not segment_view.is_empty():
+        sorted_segments = segment_view.sort("calibrated_log_loss")
+        st.markdown("**Strongest**")
+        st.dataframe(sorted_segments.head(10))
+        st.markdown("**Weakest**")
+        st.dataframe(sorted_segments.tail(10))
+
+try:
+    latest_sweep = repo.read_df("select sweep_id from experiment_rankings order by created_at desc limit 1")
+except Exception:
+    latest_sweep = pl.DataFrame([])
+if not latest_sweep.is_empty():
+    latest_sweep_id = latest_sweep["sweep_id"][0]
+    st.subheader("Persisted diagnostics (latest sweep)")
+    st.caption(f"Sweep: {latest_sweep_id}")
+
+    champion = repo.read_df(
+        f"select * from experiment_champion_view where sweep_id = '{latest_sweep_id}' order by selection_role, ranking_score"
+    )
+    st.markdown("**Default-model recommendation**")
+    st.dataframe(champion)
+
+    calib_buckets = repo.read_df(
+        f"""
+        select * from experiment_calibration_buckets
+        where sweep_id = '{latest_sweep_id}'
+        order by run_id, market, league, probability_bucket
+        """
+    )
+    st.markdown("**Calibration buckets (auditable)**")
+    st.dataframe(calib_buckets)
+
+    clv_seg = repo.read_df(
+        f"select * from experiment_clv_segments where sweep_id = '{latest_sweep_id}' order by run_id, market, league"
+    )
+    st.markdown("**CLV by market/league**")
+    st.dataframe(clv_seg)
+
+    value_hit = repo.read_df(
+        f"select * from experiment_value_flag_hit_rate where sweep_id = '{latest_sweep_id}' order by run_id, bets desc"
+    )
+    st.markdown("**Value-flag hit rate**")
+    st.dataframe(value_hit)
+
+    false_pos = repo.read_df(
+        f"select * from experiment_false_positive_zones where sweep_id = '{latest_sweep_id}' order by false_positives desc limit 100"
+    )
+    st.markdown("**False-positive concentration zones**")
+    st.dataframe(false_pos)
 
 repo.close()

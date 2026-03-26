@@ -414,6 +414,147 @@ def _calibration_error(rows: pl.DataFrame, probability_col: str) -> float | None
     return float(ece)
 
 
+def _run_robustness_score(metrics: pl.DataFrame) -> float:
+    segments = metrics.filter(pl.col("breakdown").is_in(["market", "league"]))
+    if segments.is_empty():
+        return 0.0
+    stable = segments.filter(
+        (pl.col("calibrated_log_loss").is_not_null())
+        & (pl.col("calibrated_calibration_error").is_not_null())
+        & (pl.col("calibrated_log_loss") <= segments["calibrated_log_loss"].median() * 1.25)
+        & (pl.col("calibrated_calibration_error") <= segments["calibrated_calibration_error"].median() * 1.25)
+    )
+    return float(stable.height / segments.height)
+
+
+def build_run_diagnostics(run_id: str, predictions: pl.DataFrame, metrics: pl.DataFrame) -> dict[str, pl.DataFrame]:
+    if predictions.is_empty():
+        empty = pl.DataFrame([])
+        return {
+            "segment_strength": empty,
+            "raw_vs_calibrated": empty,
+            "calibration_buckets": empty,
+            "clv_segments": empty,
+            "value_flag_hit_rate": empty,
+            "false_positive_zones": empty,
+        }
+
+    segment_strength = (
+        metrics.filter(pl.col("breakdown").is_in(["market", "league", "edge_bucket", "benchmark_source"]))
+        .with_columns(
+            pl.lit(run_id).alias("run_id"),
+            ((pl.col("calibrated_log_loss") - pl.col("raw_log_loss")) * -1).alias("lift_log_loss"),
+            ((pl.col("calibrated_brier_score") - pl.col("raw_brier_score")) * -1).alias("lift_brier"),
+        )
+        .select(
+            "run_id",
+            "breakdown",
+            "group_key",
+            "fixtures",
+            "raw_log_loss",
+            "calibrated_log_loss",
+            "raw_brier_score",
+            "calibrated_brier_score",
+            "calibrated_calibration_error",
+            "avg_clv",
+            "flat_stake_roi",
+            "lift_log_loss",
+            "lift_brier",
+        )
+    )
+
+    raw_vs_calibrated = (
+        pl.concat(
+            [
+                metrics.filter(pl.col("breakdown") == "market").with_columns(pl.lit("market").alias("dimension")),
+                metrics.filter(pl.col("breakdown") == "league").with_columns(pl.lit("league").alias("dimension")),
+            ]
+        )
+        .with_columns(pl.lit(run_id).alias("run_id"))
+        .select(
+            "run_id",
+            "dimension",
+            pl.col("group_key").alias("segment"),
+            "raw_log_loss",
+            "calibrated_log_loss",
+            "raw_brier_score",
+            "calibrated_brier_score",
+            "raw_calibration_error",
+            "calibrated_calibration_error",
+        )
+    )
+
+    bucketed = predictions.filter(pl.col("target").is_not_null()).with_columns(
+        ((pl.col("raw_probability") * 10).floor() / 10).alias("raw_prob_bucket"),
+        ((pl.col("calibrated_probability") * 10).floor() / 10).alias("cal_prob_bucket"),
+    )
+    calibration_buckets = (
+        bucketed.group_by(["market", "league", "cal_prob_bucket"])
+        .agg(
+            pl.len().alias("samples"),
+            pl.col("target").mean().alias("actual_rate"),
+            pl.col("raw_probability").mean().alias("avg_raw_probability"),
+            pl.col("calibrated_probability").mean().alias("avg_calibrated_probability"),
+        )
+        .with_columns(
+            pl.lit(run_id).alias("run_id"),
+            (pl.col("actual_rate") - pl.col("avg_calibrated_probability")).abs().alias("bucket_calibration_error"),
+        )
+        .rename({"cal_prob_bucket": "probability_bucket"})
+    )
+
+    clv_segments = (
+        predictions.filter(pl.col("clv").is_not_null())
+        .group_by(["market", "league"])
+        .agg(
+            pl.len().alias("samples"),
+            pl.col("clv").mean().alias("avg_clv"),
+            pl.col("clv").median().alias("median_clv"),
+            pl.col("beat_close").mean().alias("share_beating_close"),
+        )
+        .with_columns(pl.lit(run_id).alias("run_id"))
+    )
+
+    value_flag_hit_rate = (
+        predictions.filter(pl.col("calibrated_value_flag"))
+        .filter(~pl.col("is_push"))
+        .group_by(["market", "league"])
+        .agg(
+            pl.len().alias("bets"),
+            pl.col("target").mean().alias("hit_rate"),
+            pl.col("pnl").sum().alias("total_pnl"),
+        )
+        .with_columns(pl.lit(run_id).alias("run_id"))
+    )
+
+    false_positive_zones = (
+        predictions.filter(pl.col("calibrated_value_flag") & (pl.col("target") == 0))
+        .with_columns(((pl.col("calibrated_probability") * 10).floor() / 10).alias("probability_bucket"))
+        .group_by(["market", "league", "edge_bucket", "benchmark_source", "probability_bucket"])
+        .agg(pl.len().alias("false_positives"))
+        .with_columns(pl.lit(run_id).alias("run_id"))
+        .sort("false_positives", descending=True)
+    )
+
+    return {
+        "segment_strength": segment_strength,
+        "raw_vs_calibrated": raw_vs_calibrated,
+        "calibration_buckets": calibration_buckets,
+        "clv_segments": clv_segments,
+        "value_flag_hit_rate": value_flag_hit_rate,
+        "false_positive_zones": false_positive_zones,
+    }
+
+
+def build_champion_view(summary: pl.DataFrame) -> pl.DataFrame:
+    if summary.is_empty():
+        return pl.DataFrame([])
+    ranked = rank_experiment_runs(summary)
+    champion = ranked.head(1).with_columns(pl.lit("champion").alias("selection_role"))
+    challengers = ranked.slice(1, min(4, max(0, ranked.height - 1))).with_columns(pl.lit("challenger").alias("selection_role"))
+    return pl.concat([champion, challengers]) if challengers.height else champion
+
+
 def rank_experiment_runs(summary: pl.DataFrame) -> pl.DataFrame:
     if summary.is_empty():
         return summary
@@ -423,12 +564,21 @@ def rank_experiment_runs(summary: pl.DataFrame) -> pl.DataFrame:
         pl.col("calibrated_brier_score").rank(method="ordinal").alias("rank_brier"),
         pl.col("calibrated_calibration_error").rank(method="ordinal").alias("rank_calibration"),
         pl.col("avg_clv").rank(method="ordinal", descending=True).alias("rank_clv"),
+        pl.col("robustness_score").rank(method="ordinal", descending=True).alias("rank_robustness"),
+        pl.col("flat_stake_roi").rank(method="ordinal", descending=True).alias("rank_roi_support"),
     ).with_columns(
-        (pl.col("rank_log_loss") * 1000 + pl.col("rank_brier") * 100 + pl.col("rank_calibration") * 10 + pl.col("rank_clv")).alias(
+        (
+            pl.col("rank_log_loss") * 10000
+            + pl.col("rank_brier") * 1000
+            + pl.col("rank_calibration") * 100
+            + pl.col("rank_clv") * 10
+            + pl.col("rank_robustness") * 5
+            + pl.col("rank_roi_support")
+        ).alias(
             "ranking_score"
         )
     )
-    return ranked.sort(["ranking_score", "calibrated_log_loss", "calibrated_brier_score", "avg_clv"])
+    return ranked.sort(["ranking_score", "calibrated_log_loss", "calibrated_brier_score", "calibrated_calibration_error", "avg_clv"])
 
 
 def run_experiment_sweep(
@@ -447,6 +597,14 @@ def run_experiment_sweep(
     half_life = request.half_life_days_options or [cfg.half_life.team_form_days]
 
     rows: list[dict[str, object]] = []
+    diagnostics: dict[str, list[pl.DataFrame]] = {
+        "segment_strength": [],
+        "raw_vs_calibrated": [],
+        "calibration_buckets": [],
+        "clv_segments": [],
+        "value_flag_hit_rate": [],
+        "false_positive_zones": [],
+    }
     for dixon_w, elo_w, shot_w, edge_t, cred_t, lookback_d, half_life_d in product(dc, elo, shot, edge, cred, lookback, half_life):
         bt_request = BacktestRequest(
             start_date=request.start_date,
@@ -469,6 +627,7 @@ def run_experiment_sweep(
             continue
 
         row = overall.row(0, named=True)
+        row["robustness_score"] = _run_robustness_score(metrics)
         row.update(
             {
                 "sweep_id": sweep_id,
@@ -485,9 +644,18 @@ def run_experiment_sweep(
             }
         )
         rows.append(row)
+        run_diagnostics = build_run_diagnostics(run_id, predictions, metrics)
+        for key, value in run_diagnostics.items():
+            if not value.is_empty():
+                diagnostics[key].append(value)
 
     summary = pl.DataFrame(rows) if rows else pl.DataFrame([])
     ranking = rank_experiment_runs(summary)
+    run_experiment_sweep.last_diagnostics = {
+        key: pl.concat(frames) if frames else pl.DataFrame([])
+        for key, frames in diagnostics.items()
+    }
+    run_experiment_sweep.last_champion_view = build_champion_view(ranking)
     return sweep_id, summary, ranking
 
 
@@ -525,3 +693,20 @@ def persist_sweep_results(repo: DuckRepository, sweep_id: str, summary: pl.DataF
         repo.append_df("experiment_sweeps", summary.with_columns(pl.lit(sweep_id).alias("sweep_id")))
     if not ranking.is_empty():
         repo.append_df("experiment_rankings", ranking.with_columns(pl.lit(sweep_id).alias("sweep_id")))
+    champion_view = getattr(run_experiment_sweep, "last_champion_view", pl.DataFrame([]))
+    if isinstance(champion_view, pl.DataFrame) and not champion_view.is_empty():
+        repo.append_df("experiment_champion_view", champion_view.with_columns(pl.lit(sweep_id).alias("sweep_id")))
+    diagnostics = getattr(run_experiment_sweep, "last_diagnostics", {})
+    if isinstance(diagnostics, dict):
+        table_map = {
+            "segment_strength": "experiment_segment_strength",
+            "raw_vs_calibrated": "experiment_raw_vs_calibrated",
+            "calibration_buckets": "experiment_calibration_buckets",
+            "clv_segments": "experiment_clv_segments",
+            "value_flag_hit_rate": "experiment_value_flag_hit_rate",
+            "false_positive_zones": "experiment_false_positive_zones",
+        }
+        for key, table in table_map.items():
+            frame = diagnostics.get(key, pl.DataFrame([]))
+            if isinstance(frame, pl.DataFrame) and not frame.is_empty():
+                repo.append_df(table, frame.with_columns(pl.lit(sweep_id).alias("sweep_id")))
