@@ -82,3 +82,4 @@ def test_pipeline_end_to_end_prediction_and_persistence(tmp_path: Path):
     assert persisted_markets.filter(pl.col("market") == "1X2").height == 3
     assert persisted_markets.filter(pl.col("market") == "OU25").height == 2
     assert persisted_markets.filter(pl.col("market") == "BTTS").height == 2
+    assert persisted_markets.filter(pl.col("market") == "AH").height == 2
