@@ -68,6 +68,9 @@ class FakeStreamlit:
     def subheader(self, *_args, **_kwargs):
         return None
 
+    def markdown(self, *_args, **_kwargs):
+        return None
+
 
 class FakeRepo:
     def read_df(self, _query: str):
@@ -106,8 +109,30 @@ class FakeRepo:
                     "strike_rate": [0.52],
                     "max_drawdown": [-1.0],
                     "bets": [10],
+                    "robustness_score": [0.8],
                 }
             )
+        if "experiment_rankings" in _query:
+            return pl.DataFrame({"sweep_id": ["sw_1"], "created_at": ["2026-01-01T00:00:00"]})
+        if "experiment_champion_view" in _query:
+            return pl.DataFrame({"sweep_id": ["sw_1"], "run_id": ["bt_1"], "selection_role": ["champion"], "ranking_score": [1111]})
+        if "experiment_calibration_buckets" in _query:
+            return pl.DataFrame(
+                {
+                    "sweep_id": ["sw_1"],
+                    "run_id": ["bt_1"],
+                    "market": ["1X2"],
+                    "league": ["ENG1"],
+                    "probability_bucket": [0.5],
+                    "samples": [10],
+                }
+            )
+        if "experiment_clv_segments" in _query:
+            return pl.DataFrame({"sweep_id": ["sw_1"], "run_id": ["bt_1"], "market": ["1X2"], "league": ["ENG1"], "avg_clv": [0.01]})
+        if "experiment_value_flag_hit_rate" in _query:
+            return pl.DataFrame({"sweep_id": ["sw_1"], "run_id": ["bt_1"], "market": ["1X2"], "league": ["ENG1"], "bets": [4]})
+        if "experiment_false_positive_zones" in _query:
+            return pl.DataFrame({"sweep_id": ["sw_1"], "run_id": ["bt_1"], "false_positives": [2]})
         return pl.DataFrame(
             {
                 "fixture_id": ["f1"],
