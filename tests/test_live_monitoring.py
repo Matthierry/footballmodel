@@ -5,7 +5,7 @@ from datetime import date
 import polars as pl
 
 from footballmodel.config.settings import load_app_config
-from footballmodel.live.monitoring import build_live_review_rows
+from footballmodel.live.monitoring import build_live_review_rows, build_live_run_summary
 
 
 def test_named_default_live_config_is_resolvable():
@@ -72,3 +72,38 @@ def test_live_review_rows_include_clv_and_settlement_status():
     assert pending["settlement_status"] == "pending"
     assert pending["later_snapshot_type"] is None
     assert pending["clv"] is None
+
+
+def test_live_run_summary_rolls_up_audit_metrics():
+    run_predictions = pl.DataFrame(
+        {
+            "live_run_id": ["live_1"],
+            "run_timestamp_utc": ["2026-01-01T10:00:00"],
+            "config_name": ["champion_v1"],
+            "config_version": ["2026.03.1"],
+            "fixture_id": ["f1"],
+        }
+    )
+    run_market_predictions = pl.DataFrame({"fixture_id": ["f1", "f1"], "market": ["1X2", "BTTS"]})
+    run_review = pl.DataFrame(
+        {
+            "settlement_status": ["settled", "pending", "settled"],
+            "value_flag": [True, True, False],
+            "result_status": ["won", "pending", "lost"],
+            "clv": [0.02, None, -0.01],
+            "later_benchmark_price": [1.95, None, 3.1],
+        }
+    )
+
+    summary = build_live_run_summary(run_predictions, run_market_predictions, run_review)
+    row = summary.row(0, named=True)
+
+    assert row["live_run_id"] == "live_1"
+    assert row["fixtures_scored"] == 1
+    assert row["market_predictions"] == 2
+    assert row["review_rows"] == 3
+    assert row["settled_rows"] == 2
+    assert row["pending_rows"] == 1
+    assert row["settled_value_rows"] == 1
+    assert row["value_hit_rate"] == 1.0
+    assert round(row["benchmark_coverage_rate"], 4) == round(2 / 3, 4)

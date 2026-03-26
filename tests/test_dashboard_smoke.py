@@ -77,7 +77,7 @@ class FakeStreamlit:
 
 class FakeRepo:
     def read_df(self, _query: str):
-        if "live_model_review" in _query:
+        if "live_review_history" in _query:
             return pl.DataFrame(
                 {
                     "live_run_id": ["live_1", "live_1"],
@@ -98,6 +98,18 @@ class FakeRepo:
                     "result_status": ["won", "lost"],
                     "clv": [0.02, -0.01],
                     "value_flag": [True, False],
+                }
+            )
+        if "live_run_summaries_history" in _query:
+            return pl.DataFrame(
+                {
+                    "live_run_id": ["live_1"],
+                    "run_timestamp_utc": ["2026-01-01T00:00:00"],
+                    "config_name": ["champion_v1"],
+                    "config_version": ["2026.03.1"],
+                    "fixtures_scored": [1],
+                    "market_predictions": [2],
+                    "review_rows": [2],
                 }
             )
         if "curated_matches" in _query:

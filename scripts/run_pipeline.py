@@ -9,7 +9,7 @@ import polars as pl
 from footballmodel.config.settings import load_app_config
 from footballmodel.ingestion.clubelo import load_clubelo_csv
 from footballmodel.ingestion.football_data import load_football_data_csv
-from footballmodel.live.monitoring import build_live_review_rows
+from footballmodel.live.monitoring import build_live_review_rows, build_live_run_summary
 from footballmodel.orchestration.pipeline import (
     build_pre_kickoff_benchmark_snapshots,
     build_prediction_time_benchmark_snapshots,
@@ -86,17 +86,25 @@ def main() -> None:
                 }
             )
 
+    run_predictions_df = pl.DataFrame(predictions)
+    prediction_history_df = pl.DataFrame(prediction_markets)
+
     repo.write_df("curated_matches", matches)
     repo.write_df("elo_history", elos)
-    repo.write_df("model_runs", pl.DataFrame(predictions))
-    repo.write_df("model_market_predictions", pl.DataFrame(prediction_markets))
+    repo.append_df("model_runs", run_predictions_df)
+    repo.append_df("model_market_predictions", prediction_history_df)
     if snapshots:
         repo.upsert_benchmark_snapshots(pl.concat(snapshots))
     if upcoming.height:
         repo.upsert_benchmark_snapshots(build_pre_kickoff_benchmark_snapshots(upcoming))
 
     benchmark_snapshots = repo.read_df("select * from benchmark_snapshots")
-    live_review = build_live_review_rows(pl.DataFrame(prediction_markets), benchmark_snapshots, matches)
+    live_review = build_live_review_rows(prediction_history_df, benchmark_snapshots, matches)
+    live_summary = build_live_run_summary(run_predictions_df, prediction_history_df, live_review)
+
+    repo.append_df("live_run_summaries_history", live_summary)
+    repo.append_df("live_prediction_history", prediction_history_df)
+    repo.append_df("live_review_history", live_review)
     repo.write_df("live_model_review", live_review)
     repo.close()
 
