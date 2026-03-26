@@ -44,6 +44,27 @@ class LiveModelConfig(BaseModel):
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
 
 
+class DriftAlertConfig(BaseModel):
+    windows_days: list[int] = Field(default_factory=lambda: [7, 14, 30])
+    baseline_days: int = 120
+    min_settled_rows: int = 30
+    min_value_rows: int = 20
+    min_calibration_rows: int = 30
+    min_concentration_rows: int = 20
+    clv_drop_abs: float = 0.015
+    value_hit_rate_drop_abs: float = 0.08
+    benchmark_coverage_drop_abs: float = 0.08
+    calibration_error_increase_abs: float = 0.03
+    value_volume_ratio_low: float = 0.5
+    value_volume_ratio_high: float = 1.8
+    missing_benchmark_rate_high: float = 0.25
+    stale_snapshot_hours: int = 30
+    stale_run_hours: int = 18
+    concentration_negative_clv_share: float = 0.7
+    pending_rows_ratio_high: float = 0.8
+    severe_email_enabled: bool = True
+
+
 class AppConfig(BaseModel):
     leagues: list[str]
     weights: WeightConfig = Field(default_factory=WeightConfig)
@@ -51,6 +72,7 @@ class AppConfig(BaseModel):
     lookback: LookbackConfig = Field(default_factory=LookbackConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
+    drift_alerts: DriftAlertConfig = Field(default_factory=DriftAlertConfig)
     default_live_config: str = "champion_v1"
     live_configs: dict[str, LiveModelConfig] = Field(default_factory=dict)
 

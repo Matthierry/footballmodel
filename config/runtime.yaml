@@ -28,6 +28,25 @@ runtime:
 calibration:
   enabled: true
   min_samples: 50
+drift_alerts:
+  windows_days: [7, 14, 30]
+  baseline_days: 120
+  min_settled_rows: 30
+  min_value_rows: 20
+  min_calibration_rows: 30
+  min_concentration_rows: 20
+  clv_drop_abs: 0.015
+  value_hit_rate_drop_abs: 0.08
+  benchmark_coverage_drop_abs: 0.08
+  calibration_error_increase_abs: 0.03
+  value_volume_ratio_low: 0.5
+  value_volume_ratio_high: 1.8
+  missing_benchmark_rate_high: 0.25
+  stale_snapshot_hours: 30
+  stale_run_hours: 18
+  concentration_negative_clv_share: 0.7
+  pending_rows_ratio_high: 0.8
+  severe_email_enabled: true
 default_live_config: champion_v1
 live_configs:
   champion_v1:

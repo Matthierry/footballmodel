@@ -18,9 +18,13 @@ repo = DuckRepository()
 try:
     review = repo.read_df("select * from live_review_history order by run_timestamp_utc desc")
     runs = repo.read_df("select * from live_run_summaries_history order by run_timestamp_utc desc")
+    open_alerts = repo.read_df("select * from live_open_alerts order by alert_timestamp_utc desc")
+    alert_history = repo.read_df("select * from live_alert_history order by alert_timestamp_utc desc")
 except Exception:
     review = pl.DataFrame([])
     runs = pl.DataFrame([])
+    open_alerts = pl.DataFrame([])
+    alert_history = pl.DataFrame([])
 
 if review.is_empty():
     st.info("No live monitoring rows yet. Run the pipeline to populate live_model_review.")
@@ -199,5 +203,35 @@ else:
 
     st.subheader("Filtered live review rows")
     st.dataframe(filtered)
+
+    st.subheader("Current open alerts")
+    if open_alerts.is_empty():
+        st.caption("No open alerts.")
+    else:
+        st.dataframe(open_alerts)
+
+    st.subheader("Alert counts by severity/type")
+    if not alert_history.is_empty():
+        counts = (
+            alert_history.group_by(["severity", "alert_type"])
+            .agg(pl.len().alias("alert_count"))
+            .sort(["alert_count", "severity"], descending=[True, False])
+        )
+        st.dataframe(counts)
+    else:
+        st.caption("No alert history yet.")
+
+    st.subheader("Affected markets/leagues")
+    if not alert_history.is_empty():
+        affected = (
+            alert_history.group_by(["market", "league", "alert_type"])
+            .agg(pl.len().alias("alerts"))
+            .sort("alerts", descending=True)
+        )
+        st.dataframe(affected)
+
+    st.subheader("Alert history")
+    if not alert_history.is_empty():
+        st.dataframe(alert_history)
 
 repo.close()
