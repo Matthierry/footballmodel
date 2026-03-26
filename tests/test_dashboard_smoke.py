@@ -77,6 +77,29 @@ class FakeStreamlit:
 
 class FakeRepo:
     def read_df(self, _query: str):
+        if "live_model_review" in _query:
+            return pl.DataFrame(
+                {
+                    "live_run_id": ["live_1", "live_1"],
+                    "run_timestamp_utc": ["2026-01-01T00:00:00", "2026-01-01T00:00:00"],
+                    "config_name": ["champion_v1", "champion_v1"],
+                    "config_version": ["2026.03.1", "2026.03.1"],
+                    "fixture_id": ["f1", "f1"],
+                    "match_date": [date(2026, 1, 1), date(2026, 1, 1)],
+                    "league": ["ENG1", "ENG1"],
+                    "home_team": ["A", "A"],
+                    "away_team": ["B", "B"],
+                    "market": ["1X2", "1X2"],
+                    "outcome": ["home", "away"],
+                    "prediction_benchmark_source": ["exchange", "exchange"],
+                    "prediction_benchmark_price": [2.1, 3.2],
+                    "later_benchmark_price": [2.0, 3.4],
+                    "settlement_status": ["settled", "settled"],
+                    "result_status": ["won", "lost"],
+                    "clv": [0.02, -0.01],
+                    "value_flag": [True, False],
+                }
+            )
         if "curated_matches" in _query:
             return pl.DataFrame(
                 {
@@ -159,6 +182,9 @@ class FakeRepo:
                 "expected_home_goals": [1.2],
                 "expected_away_goals": [0.9],
                 "timestamp_utc": ["2026-01-01T00:00:00"],
+                "run_timestamp_utc": ["2026-01-01T00:00:00"],
+                "config_name": ["champion_v1"],
+                "config_version": ["2026.03.1"],
             }
         )
 
