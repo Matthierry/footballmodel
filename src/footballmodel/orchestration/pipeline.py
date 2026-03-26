@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from math import exp, log
 
 import polars as pl
 
@@ -13,24 +14,96 @@ from footballmodel.model.blending import SubModelSignal, blend_signals, elo_to_g
 from footballmodel.model.score_engine import GoalModelInputs, UnifiedScoreEngine
 
 
-def default_dc_signal(history: pl.DataFrame, fixture: dict) -> SubModelSignal:
-    home_avg = history.filter(pl.col("home_team") == fixture["home_team"]).select(pl.mean("home_goals")).item() or 1.3
-    away_avg = history.filter(pl.col("away_team") == fixture["away_team"]).select(pl.mean("away_goals")).item() or 1.1
+def _weighted_team_signal(
+    history: pl.DataFrame,
+    fixture_date: date,
+    team_col: str,
+    team: str,
+    value_col: str,
+    lookback_days: int,
+    half_life_days: int,
+    default: float,
+) -> float:
+    if value_col not in history.columns:
+        return default
+
+    scoped = history.filter(pl.col(team_col) == team).filter(pl.col("match_date") < pl.lit(fixture_date))
+    if lookback_days > 0:
+        cutoff = fixture_date - timedelta(days=lookback_days)
+        scoped = scoped.filter(pl.col("match_date") >= pl.lit(cutoff))
+    if scoped.is_empty():
+        return default
+
+    weighted_total = 0.0
+    total_weight = 0.0
+    for row in scoped.select(["match_date", value_col]).iter_rows(named=True):
+        if row[value_col] is None:
+            continue
+        age_days = max(0, (fixture_date - row["match_date"]).days)
+        decay = exp(-log(2) * age_days / max(1, half_life_days))
+        weighted_total += float(row[value_col]) * decay
+        total_weight += decay
+    if total_weight == 0:
+        return default
+    return weighted_total / total_weight
+
+
+def default_dc_signal(history: pl.DataFrame, fixture: dict, cfg: AppConfig) -> SubModelSignal:
+    fixture_date = fixture["match_date"]
+    home_avg = _weighted_team_signal(
+        history,
+        fixture_date,
+        "home_team",
+        fixture["home_team"],
+        "home_goals",
+        cfg.lookback.team_form_days,
+        cfg.half_life.team_form_days,
+        1.3,
+    )
+    away_avg = _weighted_team_signal(
+        history,
+        fixture_date,
+        "away_team",
+        fixture["away_team"],
+        "away_goals",
+        cfg.lookback.team_form_days,
+        cfg.half_life.team_form_days,
+        1.1,
+    )
     return SubModelSignal(float(home_avg), float(away_avg))
 
 
-def shot_signal(history: pl.DataFrame, fixture: dict) -> SubModelSignal:
-    h = history.filter(pl.col("home_team") == fixture["home_team"]).select(pl.mean("home_sot")).item() or 4.5
-    a = history.filter(pl.col("away_team") == fixture["away_team"]).select(pl.mean("away_sot")).item() or 4.0
+def shot_signal(history: pl.DataFrame, fixture: dict, cfg: AppConfig) -> SubModelSignal:
+    fixture_date = fixture["match_date"]
+    h = _weighted_team_signal(
+        history,
+        fixture_date,
+        "home_team",
+        fixture["home_team"],
+        "home_sot",
+        cfg.lookback.team_form_days,
+        cfg.half_life.team_form_days,
+        4.5,
+    )
+    a = _weighted_team_signal(
+        history,
+        fixture_date,
+        "away_team",
+        fixture["away_team"],
+        "away_sot",
+        cfg.lookback.team_form_days,
+        cfg.half_life.team_form_days,
+        4.0,
+    )
     return SubModelSignal(0.2 + h * 0.22, 0.2 + a * 0.22)
 
 
 def run_fixture_prediction(history: pl.DataFrame, fixture: dict, elo_history: pl.DataFrame, cfg: AppConfig) -> dict:
-    dc = default_dc_signal(history, fixture)
+    dc = default_dc_signal(history, fixture, cfg)
     h_elo = elo_as_of(elo_history, fixture["home_team"], str(fixture["match_date"]))
     a_elo = elo_as_of(elo_history, fixture["away_team"], str(fixture["match_date"]))
     elo = elo_to_goal_prior(h_elo, a_elo)
-    shot = shot_signal(history, fixture)
+    shot = shot_signal(history, fixture, cfg)
 
     blended = blend_signals(dc, elo, shot, cfg.weights.dixon_coles, cfg.weights.elo_prior, cfg.weights.shot_adjustment)
     engine = UnifiedScoreEngine(max_goals=cfg.runtime.max_goals)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from itertools import product
 from math import log
 from uuid import uuid4
 
@@ -24,6 +25,27 @@ class BacktestRequest:
     shot_adjustment_weight: float | None = None
     value_edge_threshold: float | None = None
     credibility_threshold: float | None = None
+    lookback_days: int | None = None
+    half_life_days: int | None = None
+    calibrate_probabilities: bool = True
+    calibration_min_samples: int = 50
+
+
+@dataclass(slots=True)
+class SweepRequest:
+    start_date: date
+    end_date: date
+    leagues: list[str]
+    seasons: list[str] | None = None
+    stake: float = 1.0
+    dixon_coles_weights: list[float] | None = None
+    elo_prior_weights: list[float] | None = None
+    shot_adjustment_weights: list[float] | None = None
+    value_edge_thresholds: list[float] | None = None
+    credibility_thresholds: list[float] | None = None
+    lookback_days_options: list[int] | None = None
+    half_life_days_options: list[int] | None = None
+    calibrate_probabilities: bool = True
 
 
 def _season_label(match_date: date) -> str:
@@ -99,6 +121,64 @@ def _max_drawdown(pnl: list[float]) -> float:
     return max_dd
 
 
+def _binary_log_loss(probability: float, target: int) -> float:
+    p = min(1 - 1e-12, max(1e-12, float(probability)))
+    return -(target * log(p) + (1 - target) * log(1 - p))
+
+
+def _credibility_score(probability: float | None, edge: float | None) -> float:
+    if probability is None or edge is None:
+        return 0.0
+    prob_anchor = min(1.0, probability / 0.5)
+    edge_penalty = max(0.0, 1 - abs(edge) * 3)
+    return float(max(0.0, min(1.0, 0.7 * prob_anchor + 0.3 * edge_penalty)))
+
+
+def _revalue_with_calibration(
+    probability: float,
+    current_price: float | None,
+    edge_threshold: float,
+    credibility_threshold: float,
+) -> tuple[float | None, float | None, bool, str]:
+    if current_price is None or probability <= 0:
+        return None, None, False, "missing_benchmark"
+    fair_odds = 1.0 / max(probability, 1e-12)
+    edge = current_price - fair_odds
+    cred = _credibility_score(probability, edge)
+    is_value = edge >= edge_threshold and cred >= credibility_threshold
+    return fair_odds, edge, is_value, "assessed"
+
+
+def _calibrated_probability(
+    history_rows: list[dict[str, object]],
+    market: str,
+    outcome: str,
+    raw_probability: float,
+    min_samples: int,
+) -> tuple[float, str]:
+    eligible = [
+        row
+        for row in history_rows
+        if row.get("market") == market and row.get("outcome") == outcome and row.get("target") is not None and not row.get("is_push", False)
+    ]
+    if len(eligible) < min_samples:
+        return raw_probability, "identity"
+
+    bins: dict[float, list[int]] = {}
+    for row in eligible:
+        key = float(min(0.9, max(0.0, (float(row["raw_probability"]) * 10) // 1 / 10)))
+        bins.setdefault(key, []).append(int(row["target"]))
+
+    bucket = float(min(0.9, max(0.0, (raw_probability * 10) // 1 / 10)))
+    if bucket not in bins:
+        return raw_probability, "identity"
+
+    positives = sum(bins[bucket])
+    count = len(bins[bucket])
+    calibrated = (positives + 1) / (count + 2)
+    return float(min(1 - 1e-6, max(1e-6, calibrated))), "bin_laplace"
+
+
 def run_walkforward(matches: pl.DataFrame, predict_fn, req: BacktestRequest) -> pl.DataFrame:
     scoped = matches.filter(
         (pl.col("match_date") >= pl.lit(req.start_date))
@@ -129,6 +209,10 @@ def run_backtest(matches: pl.DataFrame, elo_history: pl.DataFrame, cfg: AppConfi
         run_cfg.runtime.value_edge_threshold = req.value_edge_threshold
     if req.credibility_threshold is not None:
         run_cfg.runtime.credibility_threshold = req.credibility_threshold
+    if req.lookback_days is not None:
+        run_cfg.lookback.team_form_days = req.lookback_days
+    if req.half_life_days is not None:
+        run_cfg.half_life.team_form_days = req.half_life_days
 
     completed = matches.filter(pl.col("home_goals").is_not_null() & pl.col("away_goals").is_not_null()).with_columns(
         pl.col("match_date").map_elements(_season_label, return_dtype=pl.Utf8).alias("season")
@@ -149,8 +233,27 @@ def run_backtest(matches: pl.DataFrame, elo_history: pl.DataFrame, cfg: AppConfi
             close_price = _close_price(fixture, str(market_row["market"]), str(market_row["outcome"]))
             current = market_row.get("current_price")
             clv = (1 / current - 1 / close_price) if (current and close_price) else None
-            beat_close = (clv is not None and clv > 0)
-            implied_stake = req.stake if bool(market_row.get("value_flag")) else 0.0
+            beat_close = clv is not None and clv > 0
+
+            raw_probability = float(market_row["model_probability"])
+            calibrated_probability = raw_probability
+            calibration_method = "disabled"
+            if req.calibrate_probabilities:
+                calibrated_probability, calibration_method = _calibrated_probability(
+                    rows,
+                    str(market_row["market"]),
+                    str(market_row["outcome"]),
+                    raw_probability,
+                    req.calibration_min_samples,
+                )
+            cal_fair_odds, cal_edge, cal_value_flag, cal_status = _revalue_with_calibration(
+                calibrated_probability,
+                current,
+                run_cfg.runtime.value_edge_threshold,
+                run_cfg.runtime.credibility_threshold,
+            )
+
+            implied_stake = req.stake if cal_value_flag else 0.0
             pnl = 0.0
             if implied_stake > 0 and current:
                 if is_push:
@@ -172,21 +275,31 @@ def run_backtest(matches: pl.DataFrame, elo_history: pl.DataFrame, cfg: AppConfi
                     "away_team": fixture["away_team"],
                     "market": market_row["market"],
                     "outcome": market_row["outcome"],
-                    "model_probability": market_row["model_probability"],
+                    "raw_probability": raw_probability,
+                    "model_probability": raw_probability,
                     "model_fair_odds": market_row["model_fair_odds"],
+                    "calibrated_probability": calibrated_probability,
+                    "calibrated_fair_odds": cal_fair_odds,
+                    "calibration_method": calibration_method,
                     "current_price": current,
                     "close_price": close_price,
                     "benchmark_source": market_row.get("benchmark_source"),
                     "benchmark_available": bool(market_row.get("benchmark_available")),
                     "edge": market_row.get("edge"),
-                    "edge_bucket": _edge_bucket(market_row.get("edge")),
+                    "calibrated_edge": cal_edge,
+                    "edge_bucket": _edge_bucket(cal_edge),
                     "value_flag": bool(market_row.get("value_flag")),
+                    "calibrated_value_flag": cal_value_flag,
                     "value_status": market_row.get("value_status"),
+                    "calibrated_value_status": cal_status,
                     "credibility_score": market_row.get("credibility_score"),
+                    "calibrated_credibility_score": _credibility_score(calibrated_probability, cal_edge),
                     "target": target,
                     "is_push": is_push,
-                    "log_loss_component": -log(max(float(market_row["model_probability"]), 1e-12)) if target == 1 else None,
-                    "brier_component": (float(market_row["model_probability"]) - float(target)) ** 2 if target is not None else None,
+                    "raw_log_loss_component": _binary_log_loss(raw_probability, target) if target is not None else None,
+                    "calibrated_log_loss_component": _binary_log_loss(calibrated_probability, target) if target is not None else None,
+                    "raw_brier_component": (raw_probability - float(target)) ** 2 if target is not None else None,
+                    "calibrated_brier_component": (calibrated_probability - float(target)) ** 2 if target is not None else None,
                     "clv": clv,
                     "beat_close": beat_close,
                     "stake": implied_stake,
@@ -209,8 +322,8 @@ def compute_backtest_metrics(predictions: pl.DataFrame) -> pl.DataFrame:
         ("league", ["league"]),
         ("edge_bucket", ["edge_bucket"]),
         ("benchmark_source", ["benchmark_source"]),
-        ("value_flag", ["value_flag"]),
-        ("value_status", ["value_status"]),
+        ("value_flag", ["calibrated_value_flag"]),
+        ("value_status", ["calibrated_value_status"]),
     ]
 
     out_rows: list[dict[str, object]] = []
@@ -218,10 +331,12 @@ def compute_backtest_metrics(predictions: pl.DataFrame) -> pl.DataFrame:
         pl.col("league").first().alias("league"),
         pl.col("edge_bucket").first().alias("edge_bucket"),
         pl.col("benchmark_source").first().alias("benchmark_source"),
-        pl.col("value_flag").max().alias("value_flag"),
-        pl.col("value_status").first().alias("value_status"),
-        pl.col("log_loss_component").max().alias("log_loss"),
-        pl.col("brier_component").sum().alias("brier_score"),
+        pl.col("calibrated_value_flag").max().alias("calibrated_value_flag"),
+        pl.col("calibrated_value_status").first().alias("calibrated_value_status"),
+        pl.col("raw_log_loss_component").sum().alias("raw_log_loss"),
+        pl.col("calibrated_log_loss_component").sum().alias("calibrated_log_loss"),
+        pl.col("raw_brier_component").sum().alias("raw_brier_score"),
+        pl.col("calibrated_brier_component").sum().alias("calibrated_brier_score"),
         pl.col("match_date").first().alias("match_date"),
     )
 
@@ -232,15 +347,14 @@ def compute_backtest_metrics(predictions: pl.DataFrame) -> pl.DataFrame:
         for key_data, sub in frame.group_by(gb_keys):
             key_tuple = key_data if isinstance(key_data, tuple) else (key_data,)
             key_val = "all" if not keys else "|".join(str(v) for v in key_tuple)
-            log_loss = sub.filter(pl.col("log_loss").is_not_null())["log_loss"].mean()
-            brier = sub["brier_score"].mean()
 
             row_subset = predictions.filter(
                 pl.lit(True)
                 if not keys
                 else pl.all_horizontal([pl.col(k) == pl.lit(sub[k][0]) for k in keys])
             )
-            calib = _calibration_error(row_subset)
+            raw_calib = _calibration_error(row_subset, "raw_probability")
+            cal_calib = _calibration_error(row_subset, "calibrated_probability")
             market = row_subset.filter(pl.col("clv").is_not_null())
             avg_clv = market["clv"].mean() if market.height else None
             med_clv = market["clv"].median() if market.height else None
@@ -264,9 +378,13 @@ def compute_backtest_metrics(predictions: pl.DataFrame) -> pl.DataFrame:
                     "breakdown": breakdown,
                     "group_key": key_val,
                     "fixtures": int(sub.height),
-                    "log_loss": log_loss,
-                    "brier_score": brier,
-                    "calibration_error": calib,
+                    "raw_log_loss": sub["raw_log_loss"].mean(),
+                    "calibrated_log_loss": sub["calibrated_log_loss"].mean(),
+                    "raw_brier_score": sub["raw_brier_score"].mean(),
+                    "calibrated_brier_score": sub["calibrated_brier_score"].mean(),
+                    "calibration_error": cal_calib,
+                    "raw_calibration_error": raw_calib,
+                    "calibrated_calibration_error": cal_calib,
                     "avg_clv": avg_clv,
                     "median_clv": med_clv,
                     "share_beating_close": share_beat,
@@ -283,17 +401,94 @@ def compute_backtest_metrics(predictions: pl.DataFrame) -> pl.DataFrame:
     return pl.DataFrame(out_rows)
 
 
-def _calibration_error(rows: pl.DataFrame) -> float | None:
+def _calibration_error(rows: pl.DataFrame, probability_col: str) -> float | None:
     usable = rows.filter(pl.col("target").is_not_null())
     if usable.is_empty():
         return None
 
-    bucketed = usable.with_columns(((pl.col("model_probability") * 10).floor() / 10).alias("prob_bucket"))
+    bucketed = usable.with_columns(((pl.col(probability_col) * 10).floor() / 10).alias("prob_bucket"))
     total = bucketed.height
     ece = 0.0
     for _, bucket in bucketed.group_by("prob_bucket"):
-        ece += abs(float(bucket["target"].mean()) - float(bucket["model_probability"].mean())) * (bucket.height / total)
+        ece += abs(float(bucket["target"].mean()) - float(bucket[probability_col].mean())) * (bucket.height / total)
     return float(ece)
+
+
+def rank_experiment_runs(summary: pl.DataFrame) -> pl.DataFrame:
+    if summary.is_empty():
+        return summary
+
+    ranked = summary.with_columns(
+        pl.col("calibrated_log_loss").rank(method="ordinal").alias("rank_log_loss"),
+        pl.col("calibrated_brier_score").rank(method="ordinal").alias("rank_brier"),
+        pl.col("calibrated_calibration_error").rank(method="ordinal").alias("rank_calibration"),
+        pl.col("avg_clv").rank(method="ordinal", descending=True).alias("rank_clv"),
+    ).with_columns(
+        (pl.col("rank_log_loss") * 1000 + pl.col("rank_brier") * 100 + pl.col("rank_calibration") * 10 + pl.col("rank_clv")).alias(
+            "ranking_score"
+        )
+    )
+    return ranked.sort(["ranking_score", "calibrated_log_loss", "calibrated_brier_score", "avg_clv"])
+
+
+def run_experiment_sweep(
+    matches: pl.DataFrame,
+    elo_history: pl.DataFrame,
+    cfg: AppConfig,
+    request: SweepRequest,
+) -> tuple[str, pl.DataFrame, pl.DataFrame]:
+    sweep_id = f"sw_{uuid4().hex[:12]}"
+    dc = request.dixon_coles_weights or [cfg.weights.dixon_coles]
+    elo = request.elo_prior_weights or [cfg.weights.elo_prior]
+    shot = request.shot_adjustment_weights or [cfg.weights.shot_adjustment]
+    edge = request.value_edge_thresholds or [cfg.runtime.value_edge_threshold]
+    cred = request.credibility_thresholds or [cfg.runtime.credibility_threshold]
+    lookback = request.lookback_days_options or [cfg.lookback.team_form_days]
+    half_life = request.half_life_days_options or [cfg.half_life.team_form_days]
+
+    rows: list[dict[str, object]] = []
+    for dixon_w, elo_w, shot_w, edge_t, cred_t, lookback_d, half_life_d in product(dc, elo, shot, edge, cred, lookback, half_life):
+        bt_request = BacktestRequest(
+            start_date=request.start_date,
+            end_date=request.end_date,
+            leagues=request.leagues,
+            seasons=request.seasons,
+            stake=request.stake,
+            dixon_coles_weight=float(dixon_w),
+            elo_prior_weight=float(elo_w),
+            shot_adjustment_weight=float(shot_w),
+            value_edge_threshold=float(edge_t),
+            credibility_threshold=float(cred_t),
+            lookback_days=int(lookback_d),
+            half_life_days=int(half_life_d),
+            calibrate_probabilities=request.calibrate_probabilities,
+        )
+        run_id, predictions, metrics = run_backtest(matches, elo_history, cfg, bt_request)
+        overall = metrics.filter((pl.col("breakdown") == "overall") & (pl.col("group_key") == "all"))
+        if overall.is_empty():
+            continue
+
+        row = overall.row(0, named=True)
+        row.update(
+            {
+                "sweep_id": sweep_id,
+                "run_id": run_id,
+                "dixon_coles_weight": float(dixon_w),
+                "elo_prior_weight": float(elo_w),
+                "shot_adjustment_weight": float(shot_w),
+                "value_edge_threshold": float(edge_t),
+                "credibility_threshold": float(cred_t),
+                "lookback_days": int(lookback_d),
+                "half_life_days": int(half_life_d),
+                "calibrate_probabilities": request.calibrate_probabilities,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+        )
+        rows.append(row)
+
+    summary = pl.DataFrame(rows) if rows else pl.DataFrame([])
+    ranking = rank_experiment_runs(summary)
+    return sweep_id, summary, ranking
 
 
 def persist_backtest(repo: DuckRepository, request: BacktestRequest, run_id: str, predictions: pl.DataFrame, metrics: pl.DataFrame) -> None:
@@ -312,6 +507,9 @@ def persist_backtest(repo: DuckRepository, request: BacktestRequest, run_id: str
                 "shot_adjustment_weight": request.shot_adjustment_weight,
                 "value_edge_threshold": request.value_edge_threshold,
                 "credibility_threshold": request.credibility_threshold,
+                "lookback_days": request.lookback_days,
+                "half_life_days": request.half_life_days,
+                "calibrate_probabilities": request.calibrate_probabilities,
             }
         ]
     )
@@ -320,3 +518,10 @@ def persist_backtest(repo: DuckRepository, request: BacktestRequest, run_id: str
         repo.append_df("backtest_predictions", predictions)
     if not metrics.is_empty():
         repo.append_df("backtest_metrics", metrics)
+
+
+def persist_sweep_results(repo: DuckRepository, sweep_id: str, summary: pl.DataFrame, ranking: pl.DataFrame) -> None:
+    if not summary.is_empty():
+        repo.append_df("experiment_sweeps", summary.with_columns(pl.lit(sweep_id).alias("sweep_id")))
+    if not ranking.is_empty():
+        repo.append_df("experiment_rankings", ranking.with_columns(pl.lit(sweep_id).alias("sweep_id")))
