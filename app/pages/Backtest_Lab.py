@@ -45,6 +45,9 @@ with col_b:
     shot = st.number_input("Shot weight", min_value=0.0, max_value=1.0, value=float(cfg.weights.shot_adjustment), step=0.05)
     edge = st.number_input("Value edge threshold", min_value=0.0, max_value=1.0, value=float(cfg.runtime.value_edge_threshold), step=0.005)
     cred = st.number_input("Credibility threshold", min_value=0.0, max_value=1.0, value=float(cfg.runtime.credibility_threshold), step=0.01)
+    lookback_days = st.number_input("Team-form lookback days", min_value=30, max_value=730, value=int(cfg.lookback.team_form_days), step=15)
+    half_life_days = st.number_input("Team-form half-life days", min_value=5, max_value=365, value=int(cfg.half_life.team_form_days), step=5)
+    calibration_min_samples = st.number_input("Calibration min samples", min_value=10, max_value=500, value=50, step=10)
 
 if st.button("Run walk-forward backtest"):
     request = BacktestRequest(
@@ -58,6 +61,9 @@ if st.button("Run walk-forward backtest"):
         shot_adjustment_weight=float(shot),
         value_edge_threshold=float(edge),
         credibility_threshold=float(cred),
+        lookback_days=int(lookback_days),
+        half_life_days=int(half_life_days),
+        calibration_min_samples=int(calibration_min_samples),
     )
     run_id, predictions, metrics = run_backtest(matches, elo_history, cfg, request)
     persist_backtest(repo, request, run_id, predictions, metrics)

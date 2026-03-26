@@ -63,3 +63,21 @@ def test_backtest_persistence_writes_auditable_outputs(tmp_path, sample_matches:
     assert stored_runs.height == 1
     assert stored_predictions.filter(pl.col("run_id") == run_id).height == predictions.height
     assert stored_metrics.filter(pl.col("run_id") == run_id).height == metrics.height
+
+
+def test_backtest_stores_raw_and_calibrated_probabilities(sample_matches: pl.DataFrame):
+    cfg = load_app_config("config/runtime.yaml")
+    elo_history = pl.DataFrame({"elo_date": [date(2024, 1, 1)], "team": ["A"], "country": ["ENG"], "elo": [1600.0]})
+    req = BacktestRequest(
+        start_date=date(2024, 8, 1),
+        end_date=date(2024, 8, 20),
+        leagues=["ENG1"],
+        seasons=["2024/2025"],
+        calibration_min_samples=1,
+    )
+
+    _, predictions, metrics = run_backtest(sample_matches, elo_history, cfg, req)
+
+    assert {"raw_probability", "calibrated_probability", "calibration_method"}.issubset(set(predictions.columns))
+    assert {"raw_log_loss", "calibrated_log_loss", "raw_brier_score", "calibrated_brier_score"}.issubset(set(metrics.columns))
+
