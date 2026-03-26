@@ -9,7 +9,13 @@ import polars as pl
 from footballmodel.config.settings import load_app_config
 from footballmodel.ingestion.clubelo import load_clubelo_csv
 from footballmodel.ingestion.football_data import load_football_data_csv
-from footballmodel.live.monitoring import build_live_review_rows, build_live_run_summary
+from footballmodel.live.monitoring import (
+    build_email_alert_events,
+    build_live_review_rows,
+    build_live_run_summary,
+    build_open_alerts,
+    detect_drift_alerts,
+)
 from footballmodel.orchestration.pipeline import (
     build_pre_kickoff_benchmark_snapshots,
     build_prediction_time_benchmark_snapshots,
@@ -102,9 +108,41 @@ def main() -> None:
     live_review = build_live_review_rows(prediction_history_df, benchmark_snapshots, matches)
     live_summary = build_live_run_summary(run_predictions_df, prediction_history_df, live_review)
 
+    try:
+        review_history = repo.read_df("select * from live_review_history")
+    except Exception:
+        review_history = pl.DataFrame([])
+    review_for_alerts = pl.concat([review_history, live_review], how="vertical") if not review_history.is_empty() else live_review
+
+    try:
+        run_summary_history = repo.read_df("select * from live_run_summaries_history")
+    except Exception:
+        run_summary_history = pl.DataFrame([])
+    runs_for_alerts = pl.concat([run_summary_history, live_summary], how="vertical") if not run_summary_history.is_empty() else live_summary
+
+    alerts = detect_drift_alerts(
+        review_history=review_for_alerts,
+        run_summaries_history=runs_for_alerts,
+        benchmark_snapshots=benchmark_snapshots,
+        config_name=selected_config_name,
+        config_version=live_cfg.version,
+        run_timestamp_utc=run_timestamp,
+        thresholds=cfg.drift_alerts.model_dump(),
+    )
+    try:
+        alert_history = repo.read_df("select * from live_alert_history")
+    except Exception:
+        alert_history = pl.DataFrame([])
+    alert_history_updated = pl.concat([alert_history, alerts], how="vertical") if not alert_history.is_empty() else alerts
+    open_alerts = build_open_alerts(alert_history_updated)
+    email_events = build_email_alert_events(alerts, enabled=cfg.drift_alerts.severe_email_enabled)
+
     repo.append_df("live_run_summaries_history", live_summary)
     repo.append_df("live_prediction_history", prediction_history_df)
     repo.append_df("live_review_history", live_review)
+    repo.append_df("live_alert_history", alerts)
+    repo.write_df("live_open_alerts", open_alerts)
+    repo.append_df("live_alert_notifications_history", email_events)
     repo.write_df("live_model_review", live_review)
     repo.close()
 

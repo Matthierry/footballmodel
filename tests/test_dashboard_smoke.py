@@ -112,6 +112,30 @@ class FakeRepo:
                     "review_rows": [2],
                 }
             )
+        if "live_open_alerts" in _query:
+            return pl.DataFrame(
+                {
+                    "alert_id": ["ALRT-1"],
+                    "alert_timestamp_utc": ["2026-01-01T00:00:00"],
+                    "alert_type": ["clv_deterioration"],
+                    "severity": ["warning"],
+                    "market": ["1X2"],
+                    "league": ["ENG1"],
+                    "status": ["open"],
+                }
+            )
+        if "live_alert_history" in _query:
+            return pl.DataFrame(
+                {
+                    "alert_id": ["ALRT-1"],
+                    "alert_timestamp_utc": ["2026-01-01T00:00:00"],
+                    "alert_type": ["clv_deterioration"],
+                    "severity": ["warning"],
+                    "market": ["1X2"],
+                    "league": ["ENG1"],
+                    "status": ["open"],
+                }
+            )
         if "curated_matches" in _query:
             return pl.DataFrame(
                 {
