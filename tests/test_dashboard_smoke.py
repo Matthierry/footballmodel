@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import date
 from pathlib import Path
 
 import polars as pl
@@ -11,6 +12,7 @@ class FakeStreamlit:
     def __init__(self):
         self.secrets = {"APP_PASSWORD": "secret"}
         self.sidebar = self
+        self.session_state = {}
 
     def set_page_config(self, **_kwargs):
         return None
@@ -39,9 +41,69 @@ class FakeStreamlit:
     def caption(self, *_args, **_kwargs):
         return None
 
+    def columns(self, n: int):
+        return [self for _ in range(n)]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def date_input(self, *_args, **kwargs):
+        return kwargs.get("value")
+
+    def multiselect(self, *_args, **kwargs):
+        return kwargs.get("default", [])
+
+    def number_input(self, *_args, **kwargs):
+        return kwargs.get("value", 1.0)
+
+    def button(self, *_args, **_kwargs):
+        return False
+
+    def success(self, *_args, **_kwargs):
+        return None
+
+    def subheader(self, *_args, **_kwargs):
+        return None
+
 
 class FakeRepo:
     def read_df(self, _query: str):
+        if "curated_matches" in _query:
+            return pl.DataFrame(
+                {
+                    "fixture_id": ["f1"],
+                    "league": ["ENG1"],
+                    "match_date": [date(2026, 1, 1)],
+                    "home_team": ["A"],
+                    "away_team": ["B"],
+                    "home_goals": [1],
+                    "away_goals": [0],
+                }
+            )
+        if "elo_history" in _query:
+            return pl.DataFrame({"elo_date": [date(2025, 1, 1)], "team": ["A"], "country": ["ENG"], "elo": [1600.0]})
+        if "backtest_runs" in _query:
+            return pl.DataFrame({"run_id": ["bt_1"], "created_at": ["2026-01-01T00:00:00"]})
+        if "backtest_metrics" in _query:
+            return pl.DataFrame(
+                {
+                    "run_id": ["bt_1"],
+                    "breakdown": ["overall"],
+                    "group_key": ["all"],
+                    "log_loss": [0.5],
+                    "brier_score": [0.2],
+                    "calibration_error": [0.1],
+                    "avg_clv": [0.01],
+                    "share_beating_close": [0.55],
+                    "flat_stake_roi": [0.03],
+                    "strike_rate": [0.52],
+                    "max_drawdown": [-1.0],
+                    "bets": [10],
+                }
+            )
         return pl.DataFrame(
             {
                 "fixture_id": ["f1"],
