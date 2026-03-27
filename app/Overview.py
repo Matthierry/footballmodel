@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import polars as pl
 import streamlit as st
 
@@ -16,10 +18,22 @@ if password != get_app_password(streamlit_module=st):
 st.title("FootballModel Overview")
 repo = DuckRepository()
 try:
-    latest_summary = repo.read_table_or_empty("live_run_summaries_history", order_by="run_timestamp_utc desc", limit=1)
-    latest_predictions = repo.read_table_or_empty("model_runs", order_by="run_timestamp_utc desc, timestamp_utc desc", limit=500)
-    matches = repo.read_table_or_empty("curated_matches")
-    snapshots = repo.read_table_or_empty("benchmark_snapshots")
+    def _safe_read_table(
+        table: str,
+        *,
+        order_by: str | None = None,
+        limit: int | None = None,
+    ) -> pl.DataFrame:
+        try:
+            return repo.read_table_or_empty(table, order_by=order_by, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            st.info(f"Could not read table '{table}': {exc}")
+            return pl.DataFrame([])
+
+    latest_summary = _safe_read_table("live_run_summaries_history", order_by="run_timestamp_utc desc", limit=1)
+    latest_predictions = _safe_read_table("model_runs", order_by="run_timestamp_utc desc, timestamp_utc desc", limit=500)
+    matches = _safe_read_table("curated_matches")
+    snapshots = _safe_read_table("benchmark_snapshots")
 
     latest_summary_row = latest_summary.row(0, named=True) if latest_summary.height else None
 
@@ -29,9 +43,22 @@ try:
             f"Config: {latest_summary_row.get('config_name') or 'unknown'} "
             f"(version {latest_summary_row.get('config_version') or 'unknown'})"
         )
+        st.metric(
+            "Latest live run summary",
+            (
+                f"fixtures={latest_summary_row.get('fixtures_scored', 0) or 0}, "
+                f"markets={latest_summary_row.get('market_predictions', 0) or 0}, "
+                f"review={latest_summary_row.get('review_rows', 0) or 0}"
+            ),
+        )
     else:
         st.metric("Latest pipeline run", "No run summary available yet")
+        st.metric("Latest live run summary", "No run summary available yet")
         st.info("Pipeline summary table is empty; run the pipeline to populate latest run status.")
+
+    st.metric("Canonical match count", matches.height)
+    if matches.height == 0:
+        st.info("curated_matches is empty; run ingestion/build to populate the canonical dataset.")
 
     latest_refresh = (
         matches.select("fetched_at_utc").drop_nulls().sort("fetched_at_utc", descending=True).head(1)
@@ -51,7 +78,10 @@ try:
             if "is_future_fixture" in matches.columns
             else (pl.col("home_goals").is_null() & pl.col("away_goals").is_null())
         )
-        upcoming_count = matches.filter(future_expr).height
+        if "match_date" in matches.columns:
+            upcoming_count = matches.filter(future_expr & (pl.col("match_date") >= pl.lit(date.today()))).height
+        else:
+            upcoming_count = matches.filter(future_expr).height
     st.metric("Upcoming fixtures available", upcoming_count)
     if upcoming_count == 0:
         st.info("No upcoming fixtures are currently available in curated_matches.")

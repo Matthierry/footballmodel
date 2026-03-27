@@ -72,6 +72,16 @@ class FootballDataIngestionResult:
     failed_sources: list[str]
     rows_before_dedup: int
     rows_after_dedup: int
+    future_fixtures_fetched: int
+    future_fixtures_after_normalization: int
+    future_fixtures_after_dedup: int
+
+
+@dataclass(slots=True)
+class UpcomingFixturesParseDiagnostics:
+    fetched_future_rows: int
+    normalized_rows: int
+    future_rows: int
 
 
 def load_football_data_config(path: str | Path) -> FootballDataConfig:
@@ -102,10 +112,17 @@ def load_football_data_config(path: str | Path) -> FootballDataConfig:
 
 
 def _safe_date_parse_expr(column: str) -> pl.Expr:
+    as_text = pl.col(column).cast(pl.Utf8, strict=False).str.strip_chars()
     return pl.coalesce(
         pl.col(column).cast(pl.Date, strict=False),
-        pl.col(column).str.strptime(pl.Date, format="%d/%m/%Y", strict=False),
-        pl.col(column).str.strptime(pl.Date, format="%Y-%m-%d", strict=False),
+        as_text.str.strptime(pl.Date, format="%d/%m/%Y", strict=False),
+        as_text.str.strptime(pl.Date, format="%Y-%m-%d", strict=False),
+        as_text.str.strptime(pl.Date, format="%d/%m/%Y %H:%M", strict=False),
+        as_text.str.strptime(pl.Date, format="%d/%m/%Y %H:%M:%S", strict=False),
+        as_text.str.strptime(pl.Date, format="%Y-%m-%d %H:%M", strict=False),
+        as_text.str.strptime(pl.Date, format="%Y-%m-%d %H:%M:%S", strict=False),
+        as_text.str.strptime(pl.Datetime, format="%Y-%m-%dT%H:%M:%S%z", strict=False).dt.date(),
+        as_text.str.strptime(pl.Datetime, format="%Y-%m-%dT%H:%M:%S", strict=False).dt.date(),
     )
 
 
@@ -279,7 +296,7 @@ def _parse_upcoming_fixtures_payload(
     source_url: str,
     fetched_at_utc: str,
     csv_to_league: dict[str, str],
-) -> pl.DataFrame:
+) -> tuple[pl.DataFrame, UpcomingFixturesParseDiagnostics]:
     candidate_frames: list[pl.DataFrame] = []
     try:
         candidate_frames.append(pl.read_csv(BytesIO(payload.encode("utf-8")), ignore_errors=True))
@@ -288,6 +305,8 @@ def _parse_upcoming_fixtures_payload(
     candidate_frames.extend(_extract_html_tables(payload))
 
     normalized_frames: list[pl.DataFrame] = []
+    fetched_future_rows = 0
+    today = datetime.now(timezone.utc).date()
     for frame in candidate_frames:
         lower_to_original = {str(col).strip().lower(): str(col) for col in frame.columns}
         rename_map: dict[str, str] = {}
@@ -310,6 +329,11 @@ def _parse_upcoming_fixtures_payload(
                     break
         scoped = frame.rename(rename_map)
         if {"Date", "HomeTeam", "AwayTeam"}.issubset(set(scoped.columns)):
+            fetched_future_rows += (
+                scoped.with_columns(_safe_date_parse_expr("Date").alias("_parsed_date"))
+                .filter(pl.col("_parsed_date") >= pl.lit(today))
+                .height
+            )
             normalized_frames.append(
                 _normalize_upcoming_fixtures_df(
                     scoped,
@@ -322,11 +346,18 @@ def _parse_upcoming_fixtures_payload(
     if not normalized_frames:
         raise RuntimeError("Unable to parse upcoming fixtures payload from Football-Data matches source")
     merged = pl.concat(normalized_frames, how="diagonal_relaxed")
-    return (
+    cleaned = (
         merged.filter(pl.col("match_date").is_not_null())
         .filter(pl.col("home_team").is_not_null() & pl.col("away_team").is_not_null())
         .with_columns(_build_fixture_id_expr())
     )
+    future_rows = cleaned.filter(pl.col("match_date") >= pl.lit(datetime.now(timezone.utc).date())).height
+    diagnostics = UpcomingFixturesParseDiagnostics(
+        fetched_future_rows=fetched_future_rows,
+        normalized_rows=cleaned.height,
+        future_rows=future_rows,
+    )
+    return cleaned, diagnostics
 
 
 def build_football_data_raw_file(
@@ -348,7 +379,11 @@ def build_football_data_raw_file(
     fetched_sources: list[str] = []
     failed_sources: list[str] = []
     fetched_at = datetime.now(timezone.utc).isoformat()
+    today = datetime.now(timezone.utc).date()
     csv_to_league = {source.csv_code: source.league_code for source in cfg.sources}
+    future_fixtures_fetched = 0
+    future_fixtures_after_normalization = 0
+    upcoming_rows_after_normalization = 0
 
     for season_code in cfg.seasons:
         for source in cfg.sources:
@@ -379,12 +414,15 @@ def build_football_data_raw_file(
         source_id = "upcoming:matches_php"
         try:
             fixtures_text = _fetch_source_csv(cfg.upcoming_fixtures_url, timeout_seconds=request_timeout_seconds)
-            upcoming = _parse_upcoming_fixtures_payload(
+            upcoming, upcoming_diagnostics = _parse_upcoming_fixtures_payload(
                 fixtures_text,
                 source_url=cfg.upcoming_fixtures_url,
                 fetched_at_utc=fetched_at,
                 csv_to_league=csv_to_league,
             )
+            future_fixtures_fetched = upcoming_diagnostics.fetched_future_rows
+            future_fixtures_after_normalization = upcoming_diagnostics.future_rows
+            upcoming_rows_after_normalization = upcoming_diagnostics.normalized_rows
             if upcoming.height:
                 ingested_frames.append(upcoming)
                 fetched_sources.append(source_id)
@@ -407,12 +445,28 @@ def build_football_data_raw_file(
         .unique(subset=[c for c in DEDUPLICATION_KEY if c in merged.columns], keep="last")
         .with_columns(_build_fixture_id_expr())
     )
+    future_fixtures_after_dedup = (
+        deduped
+        .filter(pl.col("source_dataset") == "upcoming_fixtures_matches_php")
+        .filter(pl.col("match_date") >= pl.lit(today))
+        .height
+        if "source_dataset" in deduped.columns
+        else 0
+    )
     deduped.write_csv(output)
 
     if failed_sources:
         print(
             "Football-Data ingestion completed with source failures:\n"
             + "\n".join(f"- {entry}" for entry in failed_sources)
+        )
+    if cfg.include_upcoming_fixtures:
+        print(
+            "Upcoming fixtures diagnostics:"
+            f" fetched_future_rows={future_fixtures_fetched}"
+            f" normalized_rows={upcoming_rows_after_normalization}"
+            f" future_rows_after_normalization={future_fixtures_after_normalization}"
+            f" future_rows_after_dedup={future_fixtures_after_dedup}"
         )
 
     return FootballDataIngestionResult(
@@ -421,4 +475,7 @@ def build_football_data_raw_file(
         failed_sources=failed_sources,
         rows_before_dedup=rows_before_dedup,
         rows_after_dedup=deduped.height,
+        future_fixtures_fetched=future_fixtures_fetched,
+        future_fixtures_after_normalization=future_fixtures_after_normalization,
+        future_fixtures_after_dedup=future_fixtures_after_dedup,
     )
