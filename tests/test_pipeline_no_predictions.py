@@ -258,7 +258,8 @@ def test_pipeline_only_scores_future_fixtures_with_published_odds(monkeypatch, t
             {
                 "fixture_id": ["f_hist", "f_past_unplayed", "f_no_odds", "f_has_odds"],
                 "match_date": ["2026-03-20", "2026-03-21", "2026-03-30", "2026-03-31"],
-                "league": ["ENG1", "ENG1", "ENG1", "ENG1"],
+                "league": ["ENG1", "E0", "E0", "E0"],
+                "league_code": ["ENG1", "ENG1", "ENG1", "ENG1"],
                 "home_team": ["A", "P", "C", "E"],
                 "away_team": ["B", "Q", "D", "F"],
                 "home_goals": [1, None, None, None],

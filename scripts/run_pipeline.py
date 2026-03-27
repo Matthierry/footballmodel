@@ -224,9 +224,10 @@ def main() -> None:
     )
     future_date_expr = pl.col("match_date") >= pl.lit(today)
     eligible_future_expr = future_flag_expr & future_date_expr
+    league_scope_column = "league_code" if "league_code" in matches.columns else "league"
     upcoming = matches.filter(
         eligible_future_expr
-        & pl.col("league").is_in(live_cfg.leagues)
+        & pl.col(league_scope_column).cast(pl.Utf8, strict=False).is_in(live_cfg.leagues)
         & has_price_expr
     )
     history = matches.filter(pl.col("home_goals").is_not_null())
@@ -238,6 +239,7 @@ def main() -> None:
         f" curated_future_rows={future_matches_count}"
         f" eligible_future_rows={eligible_future_count}"
         f" eligible_future_with_published_odds={eligible_future_with_odds_count}"
+        f" league_scope_column={league_scope_column}"
         f" league_scoped_for_run={upcoming.height}"
     )
 
