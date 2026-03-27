@@ -85,6 +85,10 @@ class UpcomingFixturesParseDiagnostics:
     normalized_rows: int
     future_rows: int
     future_rows_with_published_odds: int
+    raw_div_column_found: bool
+    source_div_populated_rows: int
+    league_code_populated_rows: int
+    mapped_league_code_rows: int
 
 
 def load_football_data_config(path: str | Path) -> FootballDataConfig:
@@ -217,6 +221,15 @@ def _normalize_football_data_df(
     return df
 
 
+def _map_div_to_league_code_expr(column: str, *, csv_to_league: dict[str, str]) -> pl.Expr:
+    return (
+        pl.col(column)
+        .cast(pl.Utf8, strict=False)
+        .str.strip_chars()
+        .map_elements(lambda value: csv_to_league.get(value, value) if value else None, return_dtype=pl.Utf8)
+    )
+
+
 def _normalize_upcoming_fixtures_df(
     raw_df: pl.DataFrame,
     *,
@@ -229,21 +242,13 @@ def _normalize_upcoming_fixtures_df(
         source_url=source_url,
         fetched_at_utc=fetched_at_utc,
     )
+    league_source_column = "source_div" if "source_div" in normalized.columns else "league"
     normalized = normalized.with_columns(
-        pl.coalesce(
-            pl.col("league").cast(pl.Utf8, strict=False),
-            pl.col("source_div").cast(pl.Utf8, strict=False),
-        ).alias("league"),
+        _map_div_to_league_code_expr(league_source_column, csv_to_league=csv_to_league).alias("league_code")
     )
-    if "source_div" in normalized.columns:
-        normalized = normalized.with_columns(
-            pl.col("source_div")
-            .cast(pl.Utf8, strict=False)
-            .map_elements(lambda div: csv_to_league.get(div, div), return_dtype=pl.Utf8)
-            .alias("league_code")
-        )
-    else:
-        normalized = normalized.with_columns(pl.col("league").cast(pl.Utf8, strict=False).alias("league_code"))
+    normalized = normalized.with_columns(
+        pl.col("league_code").cast(pl.Utf8, strict=False).alias("league"),
+    )
     normalized = normalized.with_columns(
         pl.lit(None, dtype=pl.Utf8).alias("season_code"),
         pl.lit(False).alias("is_played"),
@@ -296,6 +301,10 @@ def _parse_upcoming_fixtures_payload(
             normalized_rows=0,
             future_rows=0,
             future_rows_with_published_odds=0,
+            raw_div_column_found=False,
+            source_div_populated_rows=0,
+            league_code_populated_rows=0,
+            mapped_league_code_rows=0,
         )
 
     lower_to_original = {str(col).strip().lower(): str(col) for col in raw_frame.columns}
@@ -342,6 +351,17 @@ def _parse_upcoming_fixtures_payload(
     has_price_expr = pl.any_horizontal([pl.col(c).is_not_null() for c in odds_cols]) if odds_cols else pl.lit(False)
     future_rows = cleaned.filter(pl.col("match_date") >= pl.lit(today)).height
     future_rows_with_published_odds = cleaned.filter((pl.col("match_date") >= pl.lit(today)) & has_price_expr).height
+    source_div_rows = cleaned.filter(pl.col("source_div").is_not_null()).height if "source_div" in cleaned.columns else 0
+    league_code_rows = cleaned.filter(pl.col("league_code").is_not_null()).height if "league_code" in cleaned.columns else 0
+    mapped_league_rows = (
+        cleaned.filter(
+            pl.col("source_div").is_not_null()
+            & pl.col("league_code").is_not_null()
+            & (pl.col("source_div").cast(pl.Utf8, strict=False) != pl.col("league_code").cast(pl.Utf8, strict=False))
+        ).height
+        if {"source_div", "league_code"}.issubset(set(cleaned.columns))
+        else 0
+    )
     diagnostics = UpcomingFixturesParseDiagnostics(
         fetched_rows=raw_frame.height,
         fetched_future_rows=(
@@ -352,6 +372,10 @@ def _parse_upcoming_fixtures_payload(
         normalized_rows=cleaned.height,
         future_rows=future_rows,
         future_rows_with_published_odds=future_rows_with_published_odds,
+        raw_div_column_found="Div" in scoped.columns,
+        source_div_populated_rows=source_div_rows,
+        league_code_populated_rows=league_code_rows,
+        mapped_league_code_rows=mapped_league_rows,
     )
     return cleaned, diagnostics
 
@@ -382,6 +406,10 @@ def build_football_data_raw_file(
     future_fixtures_after_normalization = 0
     future_fixtures_with_published_odds = 0
     upcoming_rows_after_normalization = 0
+    raw_div_column_found = False
+    source_div_populated_rows = 0
+    league_code_populated_rows = 0
+    mapped_league_code_rows = 0
 
     for season_code in cfg.seasons:
         for source in cfg.sources:
@@ -423,6 +451,10 @@ def build_football_data_raw_file(
             future_fixtures_after_normalization = upcoming_diagnostics.future_rows
             future_fixtures_with_published_odds = upcoming_diagnostics.future_rows_with_published_odds
             upcoming_rows_after_normalization = upcoming_diagnostics.normalized_rows
+            raw_div_column_found = upcoming_diagnostics.raw_div_column_found
+            source_div_populated_rows = upcoming_diagnostics.source_div_populated_rows
+            league_code_populated_rows = upcoming_diagnostics.league_code_populated_rows
+            mapped_league_code_rows = upcoming_diagnostics.mapped_league_code_rows
             if upcoming.height:
                 ingested_frames.append(upcoming)
                 fetched_sources.append(source_id)
@@ -466,6 +498,10 @@ def build_football_data_raw_file(
             f" rows_fetched={future_fixtures_rows_fetched}"
             f" fetched_future_rows={future_fixtures_fetched}"
             f" normalized_rows={upcoming_rows_after_normalization}"
+            f" raw_div_column_found={raw_div_column_found}"
+            f" source_div_rows={source_div_populated_rows}"
+            f" league_code_rows={league_code_populated_rows}"
+            f" mapped_league_code_rows={mapped_league_code_rows}"
             f" future_rows_after_normalization={future_fixtures_after_normalization}"
             f" future_rows_after_dedup={future_fixtures_after_dedup}"
             f" future_rows_with_published_odds={future_fixtures_with_published_odds}"

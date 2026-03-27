@@ -151,6 +151,10 @@ def test_build_football_data_raw_file_merges_sources_and_deduplicates(tmp_path: 
     assert merged.filter((pl.col("league_code") == "ENG1") & (pl.col("source_dataset") == "historical_league_csv")).height == 1
     assert {"league_code", "season_code", "source_url", "fetched_at_utc", "fixture_id"}.issubset(merged.columns)
     assert merged.filter(pl.col("source_dataset") == "upcoming_fixtures_csv").height == 1
+    upcoming_row = merged.filter(pl.col("source_dataset") == "upcoming_fixtures_csv").row(0, named=True)
+    assert upcoming_row["source_div"] == "E0"
+    assert upcoming_row["league_code"] == "ENG1"
+    assert upcoming_row["league"] == "ENG1"
     assert (snapshots_dir / "2526_ENG1.csv").exists()
     assert (snapshots_dir / "2526_GER1.csv").exists()
     assert (snapshots_dir / "upcoming_matches.csv").exists()
@@ -166,7 +170,7 @@ def test_parse_upcoming_fixtures_payload_normalizes_rows_and_marks_future():
     )
 
     row = parsed.row(0, named=True)
-    assert row["league"] == "E0"
+    assert row["league"] == "ENG1"
     assert row["league_code"] == "ENG1"
     assert row["home_team"] == "Man City"
     assert row["is_future_fixture"] is True
@@ -176,6 +180,10 @@ def test_parse_upcoming_fixtures_payload_normalizes_rows_and_marks_future():
     assert diagnostics.fetched_future_rows == 1
     assert diagnostics.future_rows == 1
     assert diagnostics.future_rows_with_published_odds == 1
+    assert diagnostics.raw_div_column_found is True
+    assert diagnostics.source_div_populated_rows == 1
+    assert diagnostics.league_code_populated_rows == 1
+    assert diagnostics.mapped_league_code_rows == 1
 
 
 def test_parse_upcoming_fixtures_payload_parses_datetime_dates():
