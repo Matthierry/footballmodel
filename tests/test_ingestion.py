@@ -10,6 +10,7 @@ from footballmodel.ingestion.clubelo import elo_as_of, load_clubelo_csv
 from footballmodel.ingestion.clubelo import build_clubelo_raw_file, load_clubelo_config
 from footballmodel.ingestion.football_data import (
     FOOTBALL_DATA_MAPPING,
+    _parse_upcoming_fixtures_payload,
     build_football_data_raw_file,
     load_football_data_config,
     load_football_data_csv,
@@ -103,6 +104,8 @@ def test_build_football_data_raw_file_merges_sources_and_deduplicates(tmp_path: 
                 "fail_fast: false",
                 "persist_snapshots: true",
                 "url_template: 'https://example.test/{season_code}/{csv_code}.csv'",
+                "upcoming_fixtures_url: 'https://example.test/matches.php'",
+                "include_upcoming_fixtures: true",
                 "sources:",
                 "  - league_code: ENG1",
                 "    csv_code: E0",
@@ -120,6 +123,10 @@ def test_build_football_data_raw_file_merges_sources_and_deduplicates(tmp_path: 
             "15/08/2025,E0,Man City,Arsenal,2,1\n"
         ),
         "https://example.test/2526/D1.csv": "Date,Div,HomeTeam,AwayTeam,FTHG,FTAG\n15/08/2025,D1,Bayern,Dortmund,3,2\n",
+        "https://example.test/matches.php": (
+            "Date,Div,HomeTeam,AwayTeam,B365H,B365D,B365A\n"
+            "24/08/2025,E0,Chelsea,Liverpool,2.3,3.4,2.9\n"
+        ),
     }
 
     monkeypatch.setattr(
@@ -132,13 +139,34 @@ def test_build_football_data_raw_file_merges_sources_and_deduplicates(tmp_path: 
     result = build_football_data_raw_file(config_path=cfg_path, output_path=output_path, snapshots_dir=snapshots_dir)
     merged = load_football_data_csv(output_path)
 
-    assert result.rows_before_dedup == 3
-    assert result.rows_after_dedup == 2
+    assert result.rows_before_dedup == 4
+    assert result.rows_after_dedup == 3
     assert result.failed_sources == []
-    assert merged.filter(pl.col("league_code") == "ENG1").height == 1
+    assert "upcoming:matches_php" in result.fetched_sources
+    assert merged.filter((pl.col("league_code") == "ENG1") & (pl.col("source_dataset") == "historical_league_csv")).height == 1
     assert {"league_code", "season_code", "source_url", "fetched_at_utc", "fixture_id"}.issubset(merged.columns)
+    assert merged.filter(pl.col("source_dataset") == "upcoming_fixtures_matches_php").height == 1
     assert (snapshots_dir / "2526_ENG1.csv").exists()
     assert (snapshots_dir / "2526_GER1.csv").exists()
+    assert (snapshots_dir / "upcoming_matches.csv").exists()
+
+
+def test_parse_upcoming_fixtures_payload_normalizes_rows_and_marks_future():
+    payload = "Date,Div,HomeTeam,AwayTeam,B365H,B365D,B365A\n28/03/2026,E0,Man City,Arsenal,1.8,3.7,4.5\n"
+    parsed = _parse_upcoming_fixtures_payload(
+        payload,
+        source_url="https://example.test/matches.php",
+        fetched_at_utc="2026-03-27T00:00:00+00:00",
+        csv_to_league={"E0": "ENG1"},
+    )
+
+    row = parsed.row(0, named=True)
+    assert row["league"] == "E0"
+    assert row["league_code"] == "ENG1"
+    assert row["home_team"] == "Man City"
+    assert row["is_future_fixture"] is True
+    assert row["fixture_status"] == "upcoming"
+    assert row["odds_capture_type"] == "published_at_source_fetch"
 
 
 def test_build_football_data_raw_file_fails_when_all_sources_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import polars as pl
 import streamlit as st
 
 from footballmodel.config.runtime_env import get_app_password
@@ -15,10 +16,81 @@ if password != get_app_password(streamlit_module=st):
 st.title("FootballModel Overview")
 repo = DuckRepository()
 try:
-    runs = repo.read_table_or_empty("model_runs", order_by="timestamp_utc desc", limit=200)
-    st.metric("Predictions", runs.height)
-    if runs.height:
-        st.dataframe(runs.select(["fixture_id", "home_team", "away_team", "expected_home_goals", "expected_away_goals"]))
+    latest_summary = repo.read_table_or_empty("live_run_summaries_history", order_by="run_timestamp_utc desc", limit=1)
+    latest_predictions = repo.read_table_or_empty("model_runs", order_by="run_timestamp_utc desc, timestamp_utc desc", limit=500)
+    matches = repo.read_table_or_empty("curated_matches")
+    snapshots = repo.read_table_or_empty("benchmark_snapshots")
+
+    latest_summary_row = latest_summary.row(0, named=True) if latest_summary.height else None
+
+    if latest_summary_row:
+        st.metric("Latest pipeline run", f"Completed @ {latest_summary_row['run_timestamp_utc']}")
+        st.caption(
+            f"Config: {latest_summary_row.get('config_name') or 'unknown'} "
+            f"(version {latest_summary_row.get('config_version') or 'unknown'})"
+        )
+    else:
+        st.metric("Latest pipeline run", "No run summary available yet")
+        st.info("Pipeline summary table is empty; run the pipeline to populate latest run status.")
+
+    latest_refresh = (
+        matches.select("fetched_at_utc").drop_nulls().sort("fetched_at_utc", descending=True).head(1)
+        if "fetched_at_utc" in matches.columns
+        else matches.head(0)
+    )
+    if latest_refresh.height:
+        st.metric("Latest raw refresh/build", str(latest_refresh["fetched_at_utc"][0]))
+    else:
+        st.metric("Latest raw refresh/build", "No refresh timestamp available")
+        st.info("Raw ingestion metadata is empty; verify Football-Data/ClubElo refresh completed.")
+
+    upcoming_count = 0
+    if matches.height:
+        future_expr = (
+            pl.col("is_future_fixture")
+            if "is_future_fixture" in matches.columns
+            else (pl.col("home_goals").is_null() & pl.col("away_goals").is_null())
+        )
+        upcoming_count = matches.filter(future_expr).height
+    st.metric("Upcoming fixtures available", upcoming_count)
+    if upcoming_count == 0:
+        st.info("No upcoming fixtures are currently available in curated_matches.")
+
+    latest_predictions_count = 0
+    if latest_summary_row:
+        latest_predictions_count = int(latest_summary_row.get("market_predictions") or 0)
+    st.metric("Predictions in latest run", latest_predictions_count)
+    if latest_predictions_count == 0:
+        st.info("Latest run produced zero market predictions.")
+
+    st.metric("Benchmark snapshots stored", snapshots.height)
+    if snapshots.height == 0:
+        st.info("No benchmark snapshots stored yet.")
+
+    latest_config_name = None
+    latest_config_version = None
+    if latest_summary_row:
+        latest_config_name = latest_summary_row.get("config_name")
+        latest_config_version = latest_summary_row.get("config_version")
+    elif latest_predictions.height:
+        latest_config_name = latest_predictions["config_name"][0] if "config_name" in latest_predictions.columns else None
+        latest_config_version = (
+            latest_predictions["config_version"][0] if "config_version" in latest_predictions.columns else None
+        )
+    if latest_config_name or latest_config_version:
+        st.metric("Latest live config", f"{latest_config_name or 'unknown'} / {latest_config_version or 'unknown'}")
+    else:
+        st.metric("Latest live config", "Not available")
+        st.info("No live config metadata found yet.")
+
+    st.subheader("Recent run predictions")
+    if latest_predictions.height:
+        show_cols = [
+            c
+            for c in ["fixture_id", "home_team", "away_team", "expected_home_goals", "expected_away_goals", "run_timestamp_utc"]
+            if c in latest_predictions.columns
+        ]
+        st.dataframe(latest_predictions.select(show_cols).head(50))
     else:
         st.info("No model runs yet.")
 finally:

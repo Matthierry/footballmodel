@@ -227,3 +227,67 @@ def test_pipeline_bootstrap_with_real_repository_handles_empty_optional_tables(m
     assert run_summaries.height == 1
     assert run_summaries.row(0, named=True)["market_predictions"] == 0
     assert live_review.is_empty()
+
+
+def test_pipeline_only_scores_future_fixtures_with_published_odds(monkeypatch, tmp_path: Path):
+    matches_path = tmp_path / "football_data.csv"
+    elo_path = tmp_path / "clubelo.csv"
+    matches_path.write_text("seed", encoding="utf-8")
+    elo_path.write_text("seed", encoding="utf-8")
+    fake_repo = _FakeRepo()
+
+    monkeypatch.setattr(
+        run_pipeline,
+        "parse_args",
+        lambda: SimpleNamespace(
+            config_name=None,
+            football_data_config="config/football_data_sources.yaml",
+            skip_football_data_fetch=True,
+            clubelo_config="config/clubelo_sources.yaml",
+            refresh_clubelo=False,
+            skip_clubelo_fetch=True,
+        ),
+    )
+    monkeypatch.setattr(run_pipeline, "load_app_config", lambda _path: _FakeConfig())
+    monkeypatch.setattr(run_pipeline, "DuckRepository", lambda: fake_repo)
+    monkeypatch.setattr(run_pipeline, "resolve_raw_data_paths", lambda: (matches_path, elo_path))
+    monkeypatch.setattr(
+        run_pipeline,
+        "load_football_data_csv",
+        lambda _path: pl.DataFrame(
+            {
+                "fixture_id": ["f_hist", "f_no_odds", "f_has_odds"],
+                "match_date": ["2026-03-20", "2026-03-30", "2026-03-31"],
+                "league": ["ENG1", "ENG1", "ENG1"],
+                "home_team": ["A", "C", "E"],
+                "away_team": ["B", "D", "F"],
+                "home_goals": [1, None, None],
+                "away_goals": [0, None, None],
+                "is_future_fixture": [False, True, True],
+                "avg_home_odds": [2.0, None, 2.4],
+                "avg_draw_odds": [3.0, None, 3.2],
+                "avg_away_odds": [4.0, None, 2.8],
+            }
+        ).with_columns(pl.col("match_date").cast(pl.Date, strict=False)),
+    )
+    monkeypatch.setattr(run_pipeline, "load_clubelo_csv", lambda _path: pl.DataFrame({"team": ["A"], "elo": [1500.0]}))
+    monkeypatch.setattr(
+        run_pipeline,
+        "run_fixture_prediction",
+        lambda _hist, fixture, _elo, _cfg: {
+            "fixture_id": fixture["fixture_id"],
+            "timestamp_utc": "2026-03-27T00:00:00+00:00",
+            "home_team": fixture["home_team"],
+            "away_team": fixture["away_team"],
+            "expected_home_goals": 1.0,
+            "expected_away_goals": 1.0,
+            "markets": [],
+        },
+    )
+
+    run_pipeline.main()
+
+    model_runs_appends = [df for table, df in fake_repo.append_calls if table == "model_runs"]
+    assert len(model_runs_appends) == 1
+    assert model_runs_appends[0].height == 1
+    assert model_runs_appends[0]["fixture_id"].to_list() == ["f_has_odds"]
