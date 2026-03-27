@@ -158,6 +158,7 @@ def main() -> None:
     selected_config_name, live_cfg = cfg.resolve_live_config(args.config_name)
 
     repo = DuckRepository()
+    repo.ensure_optional_tables(["benchmark_snapshots", "model_runs", "model_market_predictions"])
 
     matches_path, elo_path = resolve_raw_data_paths()
     if not args.skip_football_data_fetch:
@@ -272,7 +273,7 @@ def main() -> None:
     if upcoming.height:
         repo.upsert_benchmark_snapshots(build_pre_kickoff_benchmark_snapshots(upcoming))
 
-    benchmark_snapshots = repo.read_df("select * from benchmark_snapshots")
+    benchmark_snapshots = repo.read_table_or_empty("benchmark_snapshots")
     live_review = _ensure_schema(
         build_live_review_rows(prediction_history_df, benchmark_snapshots, matches),
         LIVE_REVIEW_SCHEMA,
@@ -308,16 +309,10 @@ def main() -> None:
             schema=LIVE_RUN_SUMMARY_SCHEMA,
         )
 
-    try:
-        review_history = repo.read_df("select * from live_review_history")
-    except Exception:
-        review_history = pl.DataFrame([])
+    review_history = repo.read_table_or_empty("live_review_history")
     review_for_alerts = pl.concat([review_history, live_review], how="vertical") if not review_history.is_empty() else live_review
 
-    try:
-        run_summary_history = repo.read_df("select * from live_run_summaries_history")
-    except Exception:
-        run_summary_history = pl.DataFrame([])
+    run_summary_history = repo.read_table_or_empty("live_run_summaries_history")
     runs_for_alerts = pl.concat([run_summary_history, live_summary], how="vertical") if not run_summary_history.is_empty() else live_summary
 
     alerts = _ensure_schema(
@@ -332,10 +327,7 @@ def main() -> None:
         ),
         ALERT_SCHEMA,
     )
-    try:
-        alert_history = repo.read_df("select * from live_alert_history")
-    except Exception:
-        alert_history = pl.DataFrame([])
+    alert_history = repo.read_table_or_empty("live_alert_history")
     alert_history_updated = pl.concat([alert_history, alerts], how="vertical") if not alert_history.is_empty() else alerts
     open_alerts = _ensure_schema(build_open_alerts(alert_history_updated), ALERT_SCHEMA)
     email_events = _ensure_schema(

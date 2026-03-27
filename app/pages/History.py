@@ -9,10 +9,7 @@ st.title("History")
 st.caption("Audit benchmark snapshots and prediction-time vs later benchmark movements.")
 
 repo = DuckRepository()
-try:
-    snapshots = repo.read_df("select * from benchmark_snapshots order by snapshot_timestamp_utc desc")
-except Exception:
-    snapshots = pl.DataFrame([])
+snapshots = repo.read_table_or_empty("benchmark_snapshots", order_by="snapshot_timestamp_utc desc")
 
 if snapshots.is_empty():
     st.info("No benchmark snapshots persisted yet.")
