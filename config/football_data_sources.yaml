@@ -1,0 +1,32 @@
+seasons:
+  - "2526"
+
+url_template: "https://www.football-data.co.uk/mmz4281/{season_code}/{csv_code}.csv"
+fail_fast: false
+persist_snapshots: true
+
+sources:
+  - league_code: ENG1
+    csv_code: E0
+  - league_code: ENG2
+    csv_code: E1
+  - league_code: GER1
+    csv_code: D1
+  - league_code: GER2
+    csv_code: D2
+  - league_code: ESP1
+    csv_code: SP1
+  - league_code: ESP2
+    csv_code: SP2
+  - league_code: FRA1
+    csv_code: F1
+  - league_code: FRA2
+    csv_code: F2
+  - league_code: ITA1
+    csv_code: I1
+  - league_code: ITA2
+    csv_code: I2
+  - league_code: POR1
+    csv_code: P1
+  - league_code: NED1
+    csv_code: N1
