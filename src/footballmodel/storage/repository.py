@@ -5,11 +5,14 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
+from footballmodel.config.runtime_env import resolve_duckdb_path
+
 
 class DuckRepository:
-    def __init__(self, db_path: str = "data/footballmodel.duckdb"):
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.con = duckdb.connect(db_path)
+    def __init__(self, db_path: str | Path | None = None):
+        resolved = Path(db_path) if db_path is not None else resolve_duckdb_path()
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        self.con = duckdb.connect(str(resolved))
 
     def close(self) -> None:
         self.con.close()

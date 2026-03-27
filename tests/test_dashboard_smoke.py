@@ -75,6 +75,17 @@ class FakeStreamlit:
         return None
 
 
+
+
+class MissingSecretsStreamlit(FakeStreamlit):
+    def __init__(self):
+        self.sidebar = self
+        self.session_state = {}
+
+    @property
+    def secrets(self):
+        raise FileNotFoundError("secrets.toml missing")
+
 class FakeRepo:
     def read_df(self, _query: str):
         if "live_review_history" in _query:
@@ -268,3 +279,16 @@ def test_dashboard_pages_smoke_load(monkeypatch):
     for idx, path in enumerate(page_paths):
         module = _load_module(path, f"page_{idx}")
         assert module is not None
+
+
+def test_overview_loads_without_streamlit_secrets_when_env_password_set(monkeypatch):
+    fake_st = MissingSecretsStreamlit()
+    monkeypatch.setenv("APP_PASSWORD", "secret")
+    monkeypatch.setitem(sys.modules, "streamlit", fake_st)
+
+    from footballmodel.storage import repository
+
+    monkeypatch.setattr(repository, "DuckRepository", FakeRepo)
+
+    overview = _load_module(Path("app/Overview.py"), "Overview_missing_secrets")
+    assert overview is not None
