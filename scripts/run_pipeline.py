@@ -24,6 +24,103 @@ from footballmodel.orchestration.pipeline import (
 from footballmodel.storage.repository import DuckRepository
 
 
+LIVE_REVIEW_SCHEMA: dict[str, pl.DataType] = {
+    "live_run_id": pl.Utf8,
+    "run_timestamp_utc": pl.Utf8,
+    "config_name": pl.Utf8,
+    "config_version": pl.Utf8,
+    "fixture_id": pl.Utf8,
+    "match_date": pl.Date,
+    "league": pl.Utf8,
+    "home_team": pl.Utf8,
+    "away_team": pl.Utf8,
+    "market": pl.Utf8,
+    "outcome": pl.Utf8,
+    "line": pl.Float64,
+    "raw_probability": pl.Float64,
+    "calibrated_probability": pl.Float64,
+    "value_flag": pl.Boolean,
+    "value_status": pl.Utf8,
+    "prediction_benchmark_price": pl.Float64,
+    "prediction_benchmark_source": pl.Utf8,
+    "prediction_snapshot_type": pl.Utf8,
+    "prediction_snapshot_timestamp_utc": pl.Utf8,
+    "later_benchmark_price": pl.Float64,
+    "later_snapshot_type": pl.Utf8,
+    "later_snapshot_source": pl.Utf8,
+    "later_snapshot_timestamp_utc": pl.Utf8,
+    "clv": pl.Float64,
+    "settlement_status": pl.Utf8,
+    "result_status": pl.Utf8,
+    "target": pl.Int64,
+    "reviewed_at_utc": pl.Utf8,
+}
+
+LIVE_RUN_SUMMARY_SCHEMA: dict[str, pl.DataType] = {
+    "live_run_id": pl.Utf8,
+    "run_timestamp_utc": pl.Utf8,
+    "config_name": pl.Utf8,
+    "config_version": pl.Utf8,
+    "fixtures_scored": pl.Int64,
+    "market_predictions": pl.Int64,
+    "review_rows": pl.Int64,
+    "pending_rows": pl.Int64,
+    "settled_rows": pl.Int64,
+    "value_rows": pl.Int64,
+    "settled_value_rows": pl.Int64,
+    "value_hit_rate": pl.Float64,
+    "avg_clv": pl.Float64,
+    "benchmark_coverage_rate": pl.Float64,
+    "summary_created_at_utc": pl.Utf8,
+}
+
+ALERT_SCHEMA: dict[str, pl.DataType] = {
+    "alert_id": pl.Utf8,
+    "alert_timestamp_utc": pl.Utf8,
+    "alert_type": pl.Utf8,
+    "severity": pl.Utf8,
+    "config_name": pl.Utf8,
+    "config_version": pl.Utf8,
+    "market": pl.Utf8,
+    "league": pl.Utf8,
+    "metric": pl.Utf8,
+    "window_days": pl.Int64,
+    "observed_value": pl.Float64,
+    "baseline_value": pl.Float64,
+    "delta_value": pl.Float64,
+    "status": pl.Utf8,
+    "details": pl.Utf8,
+}
+
+EMAIL_ALERT_SCHEMA: dict[str, pl.DataType] = {
+    "alert_id": pl.Utf8,
+    "alert_timestamp_utc": pl.Utf8,
+    "alert_type": pl.Utf8,
+    "severity": pl.Utf8,
+    "config_name": pl.Utf8,
+    "config_version": pl.Utf8,
+    "notification_status": pl.Utf8,
+    "channel": pl.Utf8,
+}
+
+
+def _frame_with_schema(rows: list[dict[str, object]], schema: dict[str, pl.DataType]) -> pl.DataFrame:
+    return pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
+
+
+def _ensure_schema(df: pl.DataFrame, schema: dict[str, pl.DataType]) -> pl.DataFrame:
+    if df.width == 0:
+        return pl.DataFrame(schema=schema)
+    return df
+
+
+def _append_if_valid(repo: DuckRepository, table: str, df: pl.DataFrame, *, empty_message: str) -> None:
+    if df.width == 0:
+        print(f"Skipping append to {table}: {empty_message}")
+        return
+    repo.append_df(table, df)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run football model live pipeline")
     parser.add_argument("--config-name", default=None, help="Named live config to run (defaults to config.default_live_config)")
@@ -158,16 +255,58 @@ def main() -> None:
 
     repo.write_df("curated_matches", matches)
     repo.write_df("elo_history", elos)
-    repo.append_df("model_runs", run_predictions_df)
-    repo.append_df("model_market_predictions", prediction_history_df)
+    _append_if_valid(
+        repo,
+        "model_runs",
+        run_predictions_df,
+        empty_message="no eligible fixtures produced run-level predictions.",
+    )
+    _append_if_valid(
+        repo,
+        "model_market_predictions",
+        prediction_history_df,
+        empty_message="no market-level predictions were generated.",
+    )
     if snapshots:
         repo.upsert_benchmark_snapshots(pl.concat(snapshots))
     if upcoming.height:
         repo.upsert_benchmark_snapshots(build_pre_kickoff_benchmark_snapshots(upcoming))
 
     benchmark_snapshots = repo.read_df("select * from benchmark_snapshots")
-    live_review = build_live_review_rows(prediction_history_df, benchmark_snapshots, matches)
-    live_summary = build_live_run_summary(run_predictions_df, prediction_history_df, live_review)
+    live_review = _ensure_schema(
+        build_live_review_rows(prediction_history_df, benchmark_snapshots, matches),
+        LIVE_REVIEW_SCHEMA,
+    )
+    live_summary = _ensure_schema(
+        build_live_run_summary(run_predictions_df, prediction_history_df, live_review),
+        LIVE_RUN_SUMMARY_SCHEMA,
+    )
+    if live_summary.is_empty():
+        print(
+            "No eligible predictions generated for this run; persisting zero-volume run summary for auditability."
+        )
+        live_summary = pl.DataFrame(
+            [
+                {
+                    "live_run_id": live_run_id,
+                    "run_timestamp_utc": run_timestamp,
+                    "config_name": selected_config_name,
+                    "config_version": live_cfg.version,
+                    "fixtures_scored": 0,
+                    "market_predictions": 0,
+                    "review_rows": 0,
+                    "pending_rows": 0,
+                    "settled_rows": 0,
+                    "value_rows": 0,
+                    "settled_value_rows": 0,
+                    "value_hit_rate": None,
+                    "avg_clv": None,
+                    "benchmark_coverage_rate": None,
+                    "summary_created_at_utc": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+            schema=LIVE_RUN_SUMMARY_SCHEMA,
+        )
 
     try:
         review_history = repo.read_df("select * from live_review_history")
@@ -181,7 +320,8 @@ def main() -> None:
         run_summary_history = pl.DataFrame([])
     runs_for_alerts = pl.concat([run_summary_history, live_summary], how="vertical") if not run_summary_history.is_empty() else live_summary
 
-    alerts = detect_drift_alerts(
+    alerts = _ensure_schema(
+        detect_drift_alerts(
         review_history=review_for_alerts,
         run_summaries_history=runs_for_alerts,
         benchmark_snapshots=benchmark_snapshots,
@@ -189,21 +329,46 @@ def main() -> None:
         config_version=live_cfg.version,
         run_timestamp_utc=run_timestamp,
         thresholds=cfg.drift_alerts.model_dump(),
+        ),
+        ALERT_SCHEMA,
     )
     try:
         alert_history = repo.read_df("select * from live_alert_history")
     except Exception:
         alert_history = pl.DataFrame([])
     alert_history_updated = pl.concat([alert_history, alerts], how="vertical") if not alert_history.is_empty() else alerts
-    open_alerts = build_open_alerts(alert_history_updated)
-    email_events = build_email_alert_events(alerts, enabled=cfg.drift_alerts.severe_email_enabled)
+    open_alerts = _ensure_schema(build_open_alerts(alert_history_updated), ALERT_SCHEMA)
+    email_events = _ensure_schema(
+        build_email_alert_events(alerts, enabled=cfg.drift_alerts.severe_email_enabled),
+        EMAIL_ALERT_SCHEMA,
+    )
 
     repo.append_df("live_run_summaries_history", live_summary)
-    repo.append_df("live_prediction_history", prediction_history_df)
-    repo.append_df("live_review_history", live_review)
-    repo.append_df("live_alert_history", alerts)
+    _append_if_valid(
+        repo,
+        "live_prediction_history",
+        prediction_history_df,
+        empty_message="run generated zero prediction rows.",
+    )
+    _append_if_valid(
+        repo,
+        "live_review_history",
+        live_review,
+        empty_message="no review rows were generated.",
+    )
+    _append_if_valid(
+        repo,
+        "live_alert_history",
+        alerts,
+        empty_message="no alerts were generated.",
+    )
     repo.write_df("live_open_alerts", open_alerts)
-    repo.append_df("live_alert_notifications_history", email_events)
+    _append_if_valid(
+        repo,
+        "live_alert_notifications_history",
+        email_events,
+        empty_message="no severe alert notifications were generated.",
+    )
     repo.write_df("live_model_review", live_review)
     repo.close()
 

@@ -18,10 +18,12 @@ class DuckRepository:
         self.con.close()
 
     def write_df(self, table: str, df: pl.DataFrame) -> None:
+        self._validate_dataframe(table, df, operation="write")
         self.con.register("tmp_df", df.to_arrow())
         self.con.execute(f"create or replace table {table} as select * from tmp_df")
 
     def append_df(self, table: str, df: pl.DataFrame) -> None:
+        self._validate_dataframe(table, df, operation="append")
         self.con.register("tmp_df", df.to_arrow())
         self.con.execute(f"create table if not exists {table} as select * from tmp_df where 1=0")
         self.con.execute(f"insert into {table} select * from tmp_df")
@@ -32,6 +34,7 @@ class DuckRepository:
     def upsert_benchmark_snapshots(self, df: pl.DataFrame) -> None:
         if df.is_empty():
             return
+        self._validate_dataframe("benchmark_snapshots", df, operation="upsert")
         self.con.register("tmp_df", df.to_arrow())
         self.con.execute("create table if not exists benchmark_snapshots as select * from tmp_df where 1=0")
         self.con.execute(
@@ -46,3 +49,11 @@ class DuckRepository:
             """
         )
         self.con.execute("insert into benchmark_snapshots select * from tmp_df")
+
+    @staticmethod
+    def _validate_dataframe(table: str, df: pl.DataFrame, operation: str) -> None:
+        if df.width == 0:
+            raise ValueError(
+                f"Cannot {operation} dataframe with zero columns into '{table}'. "
+                "Provide an explicit schema or skip persistence for this table."
+            )
