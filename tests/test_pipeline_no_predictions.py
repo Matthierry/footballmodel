@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import polars as pl
 import importlib.util
 
+from footballmodel.storage.repository import DuckRepository
 
 _RUN_PIPELINE_SPEC = importlib.util.spec_from_file_location("run_pipeline", Path("scripts/run_pipeline.py"))
 assert _RUN_PIPELINE_SPEC and _RUN_PIPELINE_SPEC.loader
@@ -146,3 +147,83 @@ def test_pipeline_no_predictions_persists_seed_state_without_crashing(monkeypatc
     assert "curated_matches" in written_tables
     assert "elo_history" in written_tables
     assert "live_model_review" in written_tables
+
+
+def test_pipeline_bootstrap_with_real_repository_handles_empty_optional_tables(monkeypatch, tmp_path: Path):
+    matches_path = tmp_path / "football_data.csv"
+    elo_path = tmp_path / "clubelo.csv"
+    db_path = tmp_path / "pipeline_bootstrap.duckdb"
+    matches_path.write_text("seed", encoding="utf-8")
+    elo_path.write_text("seed", encoding="utf-8")
+
+    monkeypatch.setattr(
+        run_pipeline,
+        "parse_args",
+        lambda: SimpleNamespace(
+            config_name=None,
+            football_data_config="config/football_data_sources.yaml",
+            skip_football_data_fetch=True,
+            clubelo_config="config/clubelo_sources.yaml",
+            refresh_clubelo=False,
+            skip_clubelo_fetch=True,
+        ),
+    )
+    monkeypatch.setattr(run_pipeline, "load_app_config", lambda _path: _FakeConfig())
+    monkeypatch.setattr(run_pipeline, "resolve_raw_data_paths", lambda: (matches_path, elo_path))
+    monkeypatch.setattr(
+        run_pipeline,
+        "DuckRepository",
+        lambda: DuckRepository(str(db_path)),
+    )
+    monkeypatch.setattr(
+        run_pipeline,
+        "load_football_data_csv",
+        lambda _path: pl.DataFrame(
+            {
+                "fixture_id": ["f_hist", "f_upcoming"],
+                "match_date": ["2026-03-20", "2026-03-30"],
+                "league": ["ENG1", "ESP1"],
+                "home_team": ["A", "C"],
+                "away_team": ["B", "D"],
+                "home_goals": [1, None],
+                "away_goals": [0, None],
+            }
+        ).with_columns(pl.col("match_date").cast(pl.Date, strict=False)),
+    )
+    monkeypatch.setattr(
+        run_pipeline,
+        "load_clubelo_csv",
+        lambda _path: pl.DataFrame(
+            {
+                "club": ["A", "B"],
+                "country": ["ENG", "ENG"],
+                "date": ["2026-03-19", "2026-03-19"],
+                "elo": [1600.0, 1500.0],
+            }
+        ),
+    )
+
+    run_pipeline.main()
+
+    repo = DuckRepository(str(db_path))
+    try:
+        snapshots = repo.read_table_or_empty("benchmark_snapshots")
+        run_summaries = repo.read_table_or_empty("live_run_summaries_history")
+        live_review = repo.read_table_or_empty("live_model_review")
+    finally:
+        repo.close()
+
+    assert snapshots.is_empty()
+    assert snapshots.columns == [
+        "fixture_id",
+        "market",
+        "outcome",
+        "line",
+        "benchmark_price",
+        "benchmark_source",
+        "snapshot_type",
+        "snapshot_timestamp_utc",
+    ]
+    assert run_summaries.height == 1
+    assert run_summaries.row(0, named=True)["market_predictions"] == 0
+    assert live_review.is_empty()

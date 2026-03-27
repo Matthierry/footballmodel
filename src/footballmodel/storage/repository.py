@@ -216,7 +216,12 @@ class DuckRepository:
         self.con.execute(f"insert into {table} select * from tmp_df")
 
     def read_df(self, query: str) -> pl.DataFrame:
-        return pl.from_arrow(self.con.execute(query).arrow())
+        # NOTE:
+        # DuckDB's `.arrow()` can yield a RecordBatchReader with zero batches for
+        # empty results. `polars.from_arrow(...)` then raises:
+        # "Must pass schema, or at least one RecordBatch".
+        # Using DuckDB's native `.pl()` conversion preserves schema on empty reads.
+        return self.con.execute(query).pl()
 
     def read_table_or_empty(self, table: str, *, order_by: str | None = None, limit: int | None = None) -> pl.DataFrame:
         if not self.has_table(table):
