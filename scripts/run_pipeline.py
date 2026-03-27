@@ -8,7 +8,7 @@ import polars as pl
 from footballmodel.config.runtime_env import resolve_raw_data_paths
 from footballmodel.config.settings import load_app_config
 from footballmodel.ingestion.clubelo import load_clubelo_csv
-from footballmodel.ingestion.football_data import load_football_data_csv
+from footballmodel.ingestion.football_data import build_football_data_raw_file, load_football_data_csv
 from footballmodel.live.monitoring import (
     build_email_alert_events,
     build_live_review_rows,
@@ -27,6 +27,16 @@ from footballmodel.storage.repository import DuckRepository
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run football model live pipeline")
     parser.add_argument("--config-name", default=None, help="Named live config to run (defaults to config.default_live_config)")
+    parser.add_argument(
+        "--football-data-config",
+        default="config/football_data_sources.yaml",
+        help="Football-Data source configuration file",
+    )
+    parser.add_argument(
+        "--skip-football-data-fetch",
+        action="store_true",
+        help="Skip automatic Football-Data ingestion and reuse existing raw file",
+    )
     return parser.parse_args()
 
 
@@ -38,6 +48,20 @@ def main() -> None:
     repo = DuckRepository()
 
     matches_path, elo_path = resolve_raw_data_paths()
+    if not args.skip_football_data_fetch:
+        try:
+            ingestion_result = build_football_data_raw_file(
+                config_path=args.football_data_config,
+                output_path=matches_path,
+                snapshots_dir=matches_path.parent / "football_data_sources",
+            )
+            print(
+                f"Built {matches_path} from {len(ingestion_result.fetched_sources)} sources "
+                f"({ingestion_result.rows_before_dedup} -> {ingestion_result.rows_after_dedup} rows after dedupe)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"Football-Data ingestion failed: {exc}")
+            return
 
     if not matches_path.exists() or not elo_path.exists():
         print(f"Raw files missing; expected {matches_path} and {elo_path}")

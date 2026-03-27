@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 
 import polars as pl
+import requests
+import yaml
 
 FOOTBALL_DATA_MAPPING = {
     "Date": "match_date",
@@ -40,9 +44,87 @@ COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
     "bf_ah_away_odds": ("PAHA",),
 }
 
+REQUIRED_CANONICAL_COLUMNS = ("match_date", "home_team", "away_team")
+DEDUPLICATION_KEY = ("league_code", "season_code", "match_date", "home_team", "away_team")
 
-def load_football_data_csv(path: str | Path) -> pl.DataFrame:
-    raw_df = pl.read_csv(path, ignore_errors=True)
+
+@dataclass(slots=True)
+class FootballDataSource:
+    league_code: str
+    csv_code: str
+
+
+@dataclass(slots=True)
+class FootballDataConfig:
+    seasons: list[str]
+    sources: list[FootballDataSource]
+    url_template: str = "https://www.football-data.co.uk/mmz4281/{season_code}/{csv_code}.csv"
+    fail_fast: bool = False
+    persist_snapshots: bool = True
+
+
+@dataclass(slots=True)
+class FootballDataIngestionResult:
+    output_path: Path
+    fetched_sources: list[str]
+    failed_sources: list[str]
+    rows_before_dedup: int
+    rows_after_dedup: int
+
+
+def load_football_data_config(path: str | Path) -> FootballDataConfig:
+    payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    seasons = [str(s) for s in payload.get("seasons", [])]
+    raw_sources = payload.get("sources", [])
+    sources = [
+        FootballDataSource(league_code=str(source["league_code"]), csv_code=str(source["csv_code"]))
+        for source in raw_sources
+    ]
+    if not seasons:
+        raise ValueError("football-data config must include at least one season code")
+    if not sources:
+        raise ValueError("football-data config must include at least one source")
+    return FootballDataConfig(
+        seasons=seasons,
+        sources=sources,
+        url_template=str(payload.get("url_template") or FootballDataConfig.url_template),
+        fail_fast=bool(payload.get("fail_fast", False)),
+        persist_snapshots=bool(payload.get("persist_snapshots", True)),
+    )
+
+
+def _safe_date_parse_expr(column: str) -> pl.Expr:
+    return pl.coalesce(
+        pl.col(column).cast(pl.Date, strict=False),
+        pl.col(column).str.strptime(pl.Date, format="%d/%m/%Y", strict=False),
+        pl.col(column).str.strptime(pl.Date, format="%Y-%m-%d", strict=False),
+    )
+
+
+def _build_fixture_id_expr() -> pl.Expr:
+    return pl.concat_str(
+        [
+            pl.coalesce(pl.col("league_code").cast(pl.Utf8, strict=False), pl.lit("")),
+            pl.lit("_"),
+            pl.coalesce(pl.col("season_code").cast(pl.Utf8, strict=False), pl.lit("")),
+            pl.lit("_"),
+            pl.coalesce(pl.col("match_date").cast(pl.Utf8, strict=False), pl.lit("")),
+            pl.lit("_"),
+            pl.coalesce(pl.col("home_team").cast(pl.Utf8, strict=False), pl.lit("")),
+            pl.lit("_"),
+            pl.coalesce(pl.col("away_team").cast(pl.Utf8, strict=False), pl.lit("")),
+        ]
+    ).alias("fixture_id")
+
+
+def _normalize_football_data_df(
+    raw_df: pl.DataFrame,
+    *,
+    league_code: str | None = None,
+    season_code: str | None = None,
+    source_url: str | None = None,
+    fetched_at_utc: str | None = None,
+) -> pl.DataFrame:
     keep_cols = [c for c in FOOTBALL_DATA_MAPPING if c in raw_df.columns]
     df = raw_df.select(keep_cols).rename({k: FOOTBALL_DATA_MAPPING[k] for k in keep_cols})
 
@@ -55,11 +137,131 @@ def load_football_data_csv(path: str | Path) -> pl.DataFrame:
             df = df.with_columns(alias_series)
 
     if "match_date" in df.columns:
+        df = df.with_columns(_safe_date_parse_expr("match_date").alias("match_date"))
+
+    if "league" in df.columns:
+        df = df.with_columns(pl.col("league").cast(pl.Utf8, strict=False).alias("source_div"))
+    else:
+        df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("source_div"))
+
+    if league_code:
         df = df.with_columns(
-            pl.col("match_date")
-            .map_elements(lambda x: datetime.strptime(str(x), "%d/%m/%Y").date() if x else None, return_dtype=pl.Date)
+            pl.lit(league_code).alias("league"),
+            pl.lit(league_code).alias("league_code"),
         )
-    df = df.with_row_index("fixture_num").with_columns(
-        (pl.col("league") + "_" + pl.col("fixture_num").cast(pl.Utf8)).alias("fixture_id")
-    )
+    elif "league" in df.columns:
+        df = df.with_columns(pl.col("league").cast(pl.Utf8, strict=False).alias("league_code"))
+
+    if season_code:
+        df = df.with_columns(pl.lit(season_code).alias("season_code"))
+    elif "season_code" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("season_code"))
+
+    if source_url:
+        df = df.with_columns(pl.lit(source_url).alias("source_url"))
+    elif "source_url" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("source_url"))
+
+    if fetched_at_utc:
+        df = df.with_columns(pl.lit(fetched_at_utc).alias("fetched_at_utc"))
+    elif "fetched_at_utc" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("fetched_at_utc"))
+
+    if "fixture_id" not in df.columns:
+        df = df.with_columns(_build_fixture_id_expr())
+
     return df
+
+
+def _is_canonical_frame(df: pl.DataFrame) -> bool:
+    return set(REQUIRED_CANONICAL_COLUMNS).issubset(df.columns)
+
+
+def load_football_data_csv(path: str | Path) -> pl.DataFrame:
+    raw_df = pl.read_csv(path, ignore_errors=True)
+    if _is_canonical_frame(raw_df):
+        df = raw_df
+        if "match_date" in df.columns:
+            df = df.with_columns(_safe_date_parse_expr("match_date").alias("match_date"))
+        if "fixture_id" not in df.columns:
+            df = df.with_columns(_build_fixture_id_expr())
+        return df
+    return _normalize_football_data_df(raw_df)
+
+
+def _fetch_source_csv(url: str, timeout_seconds: int = 20) -> str:
+    response = requests.get(url, timeout=timeout_seconds)
+    response.raise_for_status()
+    return response.text
+
+
+def build_football_data_raw_file(
+    *,
+    config_path: str | Path,
+    output_path: str | Path,
+    snapshots_dir: str | Path | None = None,
+    request_timeout_seconds: int = 20,
+) -> FootballDataIngestionResult:
+    cfg = load_football_data_config(config_path)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    snapshot_root = Path(snapshots_dir) if snapshots_dir else output.parent / "football_data_sources"
+    if cfg.persist_snapshots:
+        snapshot_root.mkdir(parents=True, exist_ok=True)
+
+    ingested_frames: list[pl.DataFrame] = []
+    fetched_sources: list[str] = []
+    failed_sources: list[str] = []
+    fetched_at = datetime.now(timezone.utc).isoformat()
+
+    for season_code in cfg.seasons:
+        for source in cfg.sources:
+            url = cfg.url_template.format(season_code=season_code, csv_code=source.csv_code, league_code=source.league_code)
+            source_id = f"{source.league_code}:{season_code}"
+            try:
+                csv_text = _fetch_source_csv(url, timeout_seconds=request_timeout_seconds)
+                raw_df = pl.read_csv(BytesIO(csv_text.encode("utf-8")), ignore_errors=True)
+                normalized = _normalize_football_data_df(
+                    raw_df,
+                    league_code=source.league_code,
+                    season_code=season_code,
+                    source_url=url,
+                    fetched_at_utc=fetched_at,
+                )
+                ingested_frames.append(normalized)
+                fetched_sources.append(source_id)
+                if cfg.persist_snapshots:
+                    snapshot_path = snapshot_root / f"{season_code}_{source.league_code}.csv"
+                    snapshot_path.write_text(csv_text, encoding="utf-8")
+            except Exception as exc:  # noqa: BLE001
+                message = f"{source_id} ({url}) failed: {exc}"
+                failed_sources.append(message)
+                if cfg.fail_fast:
+                    raise RuntimeError(message) from exc
+
+    if not ingested_frames:
+        raise RuntimeError("Football-Data ingestion failed for all configured sources")
+
+    merged = pl.concat(ingested_frames, how="vertical_relaxed")
+    rows_before_dedup = merged.height
+    deduped = (
+        merged.sort("fetched_at_utc")
+        .unique(subset=[c for c in DEDUPLICATION_KEY if c in merged.columns], keep="last")
+        .with_columns(_build_fixture_id_expr())
+    )
+    deduped.write_csv(output)
+
+    if failed_sources:
+        print(
+            "Football-Data ingestion completed with source failures:\n"
+            + "\n".join(f"- {entry}" for entry in failed_sources)
+        )
+
+    return FootballDataIngestionResult(
+        output_path=output,
+        fetched_sources=fetched_sources,
+        failed_sources=failed_sources,
+        rows_before_dedup=rows_before_dedup,
+        rows_after_dedup=deduped.height,
+    )
