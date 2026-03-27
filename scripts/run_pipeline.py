@@ -172,6 +172,12 @@ def main() -> None:
                 f"Built {matches_path} from {len(ingestion_result.fetched_sources)} sources "
                 f"({ingestion_result.rows_before_dedup} -> {ingestion_result.rows_after_dedup} rows after dedupe)"
             )
+            print(
+                "Upcoming fixture retention:"
+                f" fetched_future={ingestion_result.future_fixtures_fetched}"
+                f" normalized_future={ingestion_result.future_fixtures_after_normalization}"
+                f" deduped_future={ingestion_result.future_fixtures_after_dedup}"
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"Football-Data ingestion failed: {exc}")
             return
@@ -208,17 +214,30 @@ def main() -> None:
 
     odds_cols = [c for c in ["avg_home_odds", "avg_draw_odds", "avg_away_odds", "bf_home_odds", "bf_draw_odds", "bf_away_odds"] if c in matches.columns]
     has_price_expr = pl.any_horizontal([pl.col(c).is_not_null() for c in odds_cols]) if odds_cols else pl.lit(False)
+    today = date.today()
     future_flag_expr = (
         pl.col("is_future_fixture")
         if "is_future_fixture" in matches.columns
-        else (pl.col("home_goals").is_null() & pl.col("away_goals").is_null() & (pl.col("match_date") >= pl.lit(date.today())))
+        else (pl.col("home_goals").is_null() & pl.col("away_goals").is_null())
     )
+    future_date_expr = pl.col("match_date") >= pl.lit(today)
+    eligible_future_expr = future_flag_expr & future_date_expr
     upcoming = matches.filter(
-        future_flag_expr
+        eligible_future_expr
         & pl.col("league").is_in(live_cfg.leagues)
         & has_price_expr
     )
     history = matches.filter(pl.col("home_goals").is_not_null())
+    future_matches_count = matches.filter(future_date_expr).height
+    eligible_future_count = matches.filter(eligible_future_expr).height
+    eligible_future_with_odds_count = matches.filter(eligible_future_expr & has_price_expr).height
+    print(
+        "Future fixture diagnostics:"
+        f" curated_future_rows={future_matches_count}"
+        f" eligible_future_rows={eligible_future_count}"
+        f" eligible_future_with_published_odds={eligible_future_with_odds_count}"
+        f" league_scoped_for_run={upcoming.height}"
+    )
 
     run_timestamp = datetime.now(timezone.utc).isoformat()
     live_run_id = f"live_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
@@ -266,6 +285,7 @@ def main() -> None:
     prediction_history_df = pl.DataFrame(prediction_markets)
 
     repo.write_df("curated_matches", matches)
+    print(f"curated_matches retention: future_rows={matches.filter(future_date_expr).height} total_rows={matches.height}")
     repo.write_df("elo_history", elos)
     _append_if_valid(
         repo,

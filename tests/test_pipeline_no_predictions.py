@@ -256,17 +256,17 @@ def test_pipeline_only_scores_future_fixtures_with_published_odds(monkeypatch, t
         "load_football_data_csv",
         lambda _path: pl.DataFrame(
             {
-                "fixture_id": ["f_hist", "f_no_odds", "f_has_odds"],
-                "match_date": ["2026-03-20", "2026-03-30", "2026-03-31"],
-                "league": ["ENG1", "ENG1", "ENG1"],
-                "home_team": ["A", "C", "E"],
-                "away_team": ["B", "D", "F"],
-                "home_goals": [1, None, None],
-                "away_goals": [0, None, None],
-                "is_future_fixture": [False, True, True],
-                "avg_home_odds": [2.0, None, 2.4],
-                "avg_draw_odds": [3.0, None, 3.2],
-                "avg_away_odds": [4.0, None, 2.8],
+                "fixture_id": ["f_hist", "f_past_unplayed", "f_no_odds", "f_has_odds"],
+                "match_date": ["2026-03-20", "2026-03-21", "2026-03-30", "2026-03-31"],
+                "league": ["ENG1", "ENG1", "ENG1", "ENG1"],
+                "home_team": ["A", "P", "C", "E"],
+                "away_team": ["B", "Q", "D", "F"],
+                "home_goals": [1, None, None, None],
+                "away_goals": [0, None, None, None],
+                "is_future_fixture": [False, True, True, True],
+                "avg_home_odds": [2.0, 2.2, None, 2.4],
+                "avg_draw_odds": [3.0, 3.3, None, 3.2],
+                "avg_away_odds": [4.0, 3.1, None, 2.8],
             }
         ).with_columns(pl.col("match_date").cast(pl.Date, strict=False)),
     )
