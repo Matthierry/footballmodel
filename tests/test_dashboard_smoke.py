@@ -13,6 +13,8 @@ class FakeStreamlit:
         self.secrets = {"APP_PASSWORD": "secret"}
         self.sidebar = self
         self.session_state = {}
+        self.metrics: list[tuple[str, object]] = []
+        self.infos: list[str] = []
 
     def set_page_config(self, **_kwargs):
         return None
@@ -30,9 +32,13 @@ class FakeStreamlit:
         return None
 
     def info(self, *_args, **_kwargs):
+        if _args:
+            self.infos.append(str(_args[0]))
         return None
 
     def metric(self, *_args, **_kwargs):
+        if len(_args) >= 2:
+            self.metrics.append((str(_args[0]), _args[1]))
         return None
 
     def dataframe(self, *_args, **_kwargs):
@@ -81,6 +87,8 @@ class MissingSecretsStreamlit(FakeStreamlit):
     def __init__(self):
         self.sidebar = self
         self.session_state = {}
+        self.metrics = []
+        self.infos = []
 
     @property
     def secrets(self):
@@ -314,6 +322,25 @@ class MissingOptionalTablesRepo:
         return None
 
 
+class EmptyOverviewRepo:
+    def read_table_or_empty(self, table: str, *, order_by: str | None = None, limit: int | None = None):
+        _ = (table, order_by, limit)
+        if table == "curated_matches":
+            return pl.DataFrame(
+                schema={
+                    "fixture_id": pl.Utf8,
+                    "match_date": pl.Date,
+                    "home_goals": pl.Int64,
+                    "away_goals": pl.Int64,
+                    "is_future_fixture": pl.Boolean,
+                }
+            )
+        return pl.DataFrame([])
+
+    def close(self):
+        return None
+
+
 def test_dashboard_optional_tables_missing_still_loads(monkeypatch):
     fake_st = FakeStreamlit()
     monkeypatch.setitem(sys.modules, "streamlit", fake_st)
@@ -329,3 +356,18 @@ def test_dashboard_optional_tables_missing_still_loads(monkeypatch):
     assert overview is not None
     assert history is not None
     assert run_control is not None
+
+
+def test_overview_explicit_empty_states_render(monkeypatch):
+    fake_st = FakeStreamlit()
+    monkeypatch.setitem(sys.modules, "streamlit", fake_st)
+
+    from footballmodel.storage import repository
+
+    monkeypatch.setattr(repository, "DuckRepository", EmptyOverviewRepo)
+
+    overview = _load_module(Path("app/Overview.py"), "Overview_empty_states")
+    assert overview is not None
+    assert ("Upcoming fixtures available", 0) in fake_st.metrics
+    assert ("Predictions in latest run", 0) in fake_st.metrics
+    assert any("Latest run produced zero market predictions." in entry for entry in fake_st.infos)

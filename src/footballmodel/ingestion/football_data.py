@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
-
+import pandas as pd
 import polars as pl
 import requests
 import yaml
@@ -59,6 +59,8 @@ class FootballDataConfig:
     seasons: list[str]
     sources: list[FootballDataSource]
     url_template: str = "https://www.football-data.co.uk/mmz4281/{season_code}/{csv_code}.csv"
+    upcoming_fixtures_url: str | None = "https://www.football-data.co.uk/matches.php"
+    include_upcoming_fixtures: bool = True
     fail_fast: bool = False
     persist_snapshots: bool = True
 
@@ -88,6 +90,12 @@ def load_football_data_config(path: str | Path) -> FootballDataConfig:
         seasons=seasons,
         sources=sources,
         url_template=str(payload.get("url_template") or FootballDataConfig.url_template),
+        upcoming_fixtures_url=(
+            str(payload.get("upcoming_fixtures_url"))
+            if payload.get("upcoming_fixtures_url") is not None
+            else FootballDataConfig.upcoming_fixtures_url
+        ),
+        include_upcoming_fixtures=bool(payload.get("include_upcoming_fixtures", True)),
         fail_fast=bool(payload.get("fail_fast", False)),
         persist_snapshots=bool(payload.get("persist_snapshots", True)),
     )
@@ -170,7 +178,61 @@ def _normalize_football_data_df(
     if "fixture_id" not in df.columns:
         df = df.with_columns(_build_fixture_id_expr())
 
+    if "home_goals" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("home_goals"))
+    if "away_goals" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("away_goals"))
+
+    df = df.with_columns(
+        (pl.col("home_goals").is_not_null() & pl.col("away_goals").is_not_null()).alias("is_played"),
+        (pl.col("home_goals").is_null() & pl.col("away_goals").is_null()).alias("is_future_fixture"),
+        pl.when(pl.col("home_goals").is_not_null() & pl.col("away_goals").is_not_null())
+        .then(pl.lit("played"))
+        .otherwise(pl.lit("upcoming"))
+        .alias("fixture_status"),
+        pl.lit("historical_league_csv").alias("source_dataset"),
+        pl.lit("published_at_source_fetch").alias("odds_capture_type"),
+    )
+
     return df
+
+
+def _normalize_upcoming_fixtures_df(
+    raw_df: pl.DataFrame,
+    *,
+    csv_to_league: dict[str, str],
+    source_url: str,
+    fetched_at_utc: str,
+) -> pl.DataFrame:
+    normalized = _normalize_football_data_df(
+        raw_df,
+        source_url=source_url,
+        fetched_at_utc=fetched_at_utc,
+    )
+    normalized = normalized.with_columns(
+        pl.coalesce(
+            pl.col("league").cast(pl.Utf8, strict=False),
+            pl.col("source_div").cast(pl.Utf8, strict=False),
+        ).alias("league"),
+    )
+    if "source_div" in normalized.columns:
+        normalized = normalized.with_columns(
+            pl.col("source_div")
+            .cast(pl.Utf8, strict=False)
+            .map_elements(lambda div: csv_to_league.get(div, div), return_dtype=pl.Utf8)
+            .alias("league_code")
+        )
+    else:
+        normalized = normalized.with_columns(pl.col("league").cast(pl.Utf8, strict=False).alias("league_code"))
+    normalized = normalized.with_columns(
+        pl.lit(None, dtype=pl.Utf8).alias("season_code"),
+        pl.lit(False).alias("is_played"),
+        pl.lit(True).alias("is_future_fixture"),
+        pl.lit("upcoming").alias("fixture_status"),
+        pl.lit("upcoming_fixtures_matches_php").alias("source_dataset"),
+        pl.lit("published_at_source_fetch").alias("odds_capture_type"),
+    )
+    return normalized
 
 
 def _is_canonical_frame(df: pl.DataFrame) -> bool:
@@ -195,6 +257,78 @@ def _fetch_source_csv(url: str, timeout_seconds: int = 20) -> str:
     return response.text
 
 
+def _extract_html_tables(html: str) -> list[pl.DataFrame]:
+    try:
+        tables = pd.read_html(StringIO(html))
+    except (ValueError, ImportError):
+        return []
+    frames: list[pl.DataFrame] = []
+    for frame in tables:
+        if frame.empty:
+            continue
+        if isinstance(frame.columns, pd.MultiIndex):
+            frame.columns = [str(col[-1]) if isinstance(col, tuple) else str(col) for col in frame.columns]
+        frame.columns = [str(c).strip() for c in frame.columns]
+        frames.append(pl.from_pandas(frame))
+    return frames
+
+
+def _parse_upcoming_fixtures_payload(
+    payload: str,
+    *,
+    source_url: str,
+    fetched_at_utc: str,
+    csv_to_league: dict[str, str],
+) -> pl.DataFrame:
+    candidate_frames: list[pl.DataFrame] = []
+    try:
+        candidate_frames.append(pl.read_csv(BytesIO(payload.encode("utf-8")), ignore_errors=True))
+    except Exception:  # noqa: BLE001
+        pass
+    candidate_frames.extend(_extract_html_tables(payload))
+
+    normalized_frames: list[pl.DataFrame] = []
+    for frame in candidate_frames:
+        lower_to_original = {str(col).strip().lower(): str(col) for col in frame.columns}
+        rename_map: dict[str, str] = {}
+        for canonical in ("Date", "Div", "HomeTeam", "AwayTeam", "FTHG", "FTAG"):
+            if canonical.lower() in lower_to_original:
+                rename_map[lower_to_original[canonical.lower()]] = canonical
+
+        aliases: dict[str, tuple[str, ...]] = {
+            "B365H": ("b365h", "home", "home_odds"),
+            "B365D": ("b365d", "draw", "draw_odds"),
+            "B365A": ("b365a", "away", "away_odds"),
+            "BFH": ("bfh", "pinh", "psh"),
+            "BFD": ("bfd", "pind", "psd"),
+            "BFA": ("bfa", "pina", "psa"),
+        }
+        for target, candidates in aliases.items():
+            for alias in candidates:
+                if alias in lower_to_original:
+                    rename_map[lower_to_original[alias]] = target
+                    break
+        scoped = frame.rename(rename_map)
+        if {"Date", "HomeTeam", "AwayTeam"}.issubset(set(scoped.columns)):
+            normalized_frames.append(
+                _normalize_upcoming_fixtures_df(
+                    scoped,
+                    csv_to_league=csv_to_league,
+                    source_url=source_url,
+                    fetched_at_utc=fetched_at_utc,
+                )
+            )
+
+    if not normalized_frames:
+        raise RuntimeError("Unable to parse upcoming fixtures payload from Football-Data matches source")
+    merged = pl.concat(normalized_frames, how="diagonal_relaxed")
+    return (
+        merged.filter(pl.col("match_date").is_not_null())
+        .filter(pl.col("home_team").is_not_null() & pl.col("away_team").is_not_null())
+        .with_columns(_build_fixture_id_expr())
+    )
+
+
 def build_football_data_raw_file(
     *,
     config_path: str | Path,
@@ -214,6 +348,7 @@ def build_football_data_raw_file(
     fetched_sources: list[str] = []
     failed_sources: list[str] = []
     fetched_at = datetime.now(timezone.utc).isoformat()
+    csv_to_league = {source.csv_code: source.league_code for source in cfg.sources}
 
     for season_code in cfg.seasons:
         for source in cfg.sources:
@@ -240,10 +375,32 @@ def build_football_data_raw_file(
                 if cfg.fail_fast:
                     raise RuntimeError(message) from exc
 
+    if cfg.include_upcoming_fixtures and cfg.upcoming_fixtures_url:
+        source_id = "upcoming:matches_php"
+        try:
+            fixtures_text = _fetch_source_csv(cfg.upcoming_fixtures_url, timeout_seconds=request_timeout_seconds)
+            upcoming = _parse_upcoming_fixtures_payload(
+                fixtures_text,
+                source_url=cfg.upcoming_fixtures_url,
+                fetched_at_utc=fetched_at,
+                csv_to_league=csv_to_league,
+            )
+            if upcoming.height:
+                ingested_frames.append(upcoming)
+                fetched_sources.append(source_id)
+                if cfg.persist_snapshots:
+                    snapshot_path = snapshot_root / "upcoming_matches.csv"
+                    upcoming.write_csv(snapshot_path)
+        except Exception as exc:  # noqa: BLE001
+            message = f"{source_id} ({cfg.upcoming_fixtures_url}) failed: {exc}"
+            failed_sources.append(message)
+            if cfg.fail_fast:
+                raise RuntimeError(message) from exc
+
     if not ingested_frames:
         raise RuntimeError("Football-Data ingestion failed for all configured sources")
 
-    merged = pl.concat(ingested_frames, how="vertical_relaxed")
+    merged = pl.concat(ingested_frames, how="diagonal_relaxed")
     rows_before_dedup = merged.height
     deduped = (
         merged.sort("fetched_at_utc")

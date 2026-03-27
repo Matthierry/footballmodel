@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import polars as pl
 
@@ -206,7 +206,18 @@ def main() -> None:
     matches = load_football_data_csv(matches_path)
     elos = load_clubelo_csv(elo_path)
 
-    upcoming = matches.filter(pl.col("home_goals").is_null() & pl.col("league").is_in(live_cfg.leagues))
+    odds_cols = [c for c in ["avg_home_odds", "avg_draw_odds", "avg_away_odds", "bf_home_odds", "bf_draw_odds", "bf_away_odds"] if c in matches.columns]
+    has_price_expr = pl.any_horizontal([pl.col(c).is_not_null() for c in odds_cols]) if odds_cols else pl.lit(False)
+    future_flag_expr = (
+        pl.col("is_future_fixture")
+        if "is_future_fixture" in matches.columns
+        else (pl.col("home_goals").is_null() & pl.col("away_goals").is_null() & (pl.col("match_date") >= pl.lit(date.today())))
+    )
+    upcoming = matches.filter(
+        future_flag_expr
+        & pl.col("league").is_in(live_cfg.leagues)
+        & has_price_expr
+    )
     history = matches.filter(pl.col("home_goals").is_not_null())
 
     run_timestamp = datetime.now(timezone.utc).isoformat()
