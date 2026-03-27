@@ -235,6 +235,14 @@ class FakeRepo:
             }
         )
 
+    def read_table_or_empty(self, table: str, *, order_by: str | None = None, limit: int | None = None):
+        query = f"select * from {table}"
+        if order_by:
+            query = f"{query} order by {order_by}"
+        if limit is not None:
+            query = f"{query} limit {limit}"
+        return self.read_df(query)
+
     def close(self):
         return None
 
@@ -292,3 +300,32 @@ def test_overview_loads_without_streamlit_secrets_when_env_password_set(monkeypa
 
     overview = _load_module(Path("app/Overview.py"), "Overview_missing_secrets")
     assert overview is not None
+
+
+class MissingOptionalTablesRepo:
+    def read_table_or_empty(self, table: str, *, order_by: str | None = None, limit: int | None = None):
+        _ = (table, order_by, limit)
+        return pl.DataFrame([])
+
+    def read_df(self, _query: str):
+        raise RuntimeError("table missing")
+
+    def close(self):
+        return None
+
+
+def test_dashboard_optional_tables_missing_still_loads(monkeypatch):
+    fake_st = FakeStreamlit()
+    monkeypatch.setitem(sys.modules, "streamlit", fake_st)
+
+    from footballmodel.storage import repository
+
+    monkeypatch.setattr(repository, "DuckRepository", MissingOptionalTablesRepo)
+
+    overview = _load_module(Path("app/Overview.py"), "Overview_missing_optional")
+    history = _load_module(Path("app/pages/History.py"), "History_missing_optional")
+    run_control = _load_module(Path("app/pages/Run_Control.py"), "RunControl_missing_optional")
+
+    assert overview is not None
+    assert history is not None
+    assert run_control is not None

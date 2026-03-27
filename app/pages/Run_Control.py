@@ -15,19 +15,13 @@ active_name, active_cfg = cfg.resolve_live_config()
 st.caption(f"Default scheduled config: **{active_name}** (version **{active_cfg.version}**)" )
 
 repo = DuckRepository()
-try:
-    review = repo.read_df("select * from live_review_history order by run_timestamp_utc desc")
-    runs = repo.read_df("select * from live_run_summaries_history order by run_timestamp_utc desc")
-    open_alerts = repo.read_df("select * from live_open_alerts order by alert_timestamp_utc desc")
-    alert_history = repo.read_df("select * from live_alert_history order by alert_timestamp_utc desc")
-except Exception:
-    review = pl.DataFrame([])
-    runs = pl.DataFrame([])
-    open_alerts = pl.DataFrame([])
-    alert_history = pl.DataFrame([])
+review = repo.read_table_or_empty("live_review_history", order_by="run_timestamp_utc desc")
+runs = repo.read_table_or_empty("live_run_summaries_history", order_by="run_timestamp_utc desc")
+open_alerts = repo.read_table_or_empty("live_open_alerts", order_by="alert_timestamp_utc desc")
+alert_history = repo.read_table_or_empty("live_alert_history", order_by="alert_timestamp_utc desc")
 
 if review.is_empty():
-    st.info("No live monitoring rows yet. Run the pipeline to populate live_model_review.")
+    st.info("No live predictions yet.")
 else:
     for col in ("match_date", "run_timestamp_utc"):
         if col in review.columns:

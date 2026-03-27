@@ -44,14 +44,18 @@ class _FakeRepo:
     def write_df(self, table: str, df: pl.DataFrame) -> None:
         self.write_calls.append((table, df))
 
+    def ensure_optional_tables(self, _tables: list[str] | None = None) -> None:
+        return
+
     def append_df(self, table: str, df: pl.DataFrame) -> None:
         self.append_calls.append((table, df))
 
     def upsert_benchmark_snapshots(self, _df: pl.DataFrame) -> None:
         return
 
-    def read_df(self, query: str) -> pl.DataFrame:
-        if "benchmark_snapshots" in query:
+    def read_table_or_empty(self, table: str, *, order_by: str | None = None, limit: int | None = None) -> pl.DataFrame:
+        _ = (order_by, limit)
+        if table == "benchmark_snapshots":
             return pl.DataFrame(
                 schema={
                     "fixture_id": pl.Utf8,
@@ -64,7 +68,13 @@ class _FakeRepo:
                     "snapshot_timestamp_utc": pl.Utf8,
                 }
             )
-        raise RuntimeError("table missing")
+        if table == "live_review_history":
+            return pl.DataFrame(schema=run_pipeline.LIVE_REVIEW_SCHEMA)
+        if table == "live_run_summaries_history":
+            return pl.DataFrame(schema=run_pipeline.LIVE_RUN_SUMMARY_SCHEMA)
+        if table == "live_alert_history":
+            return pl.DataFrame(schema=run_pipeline.ALERT_SCHEMA)
+        return pl.DataFrame([])
 
     def close(self) -> None:
         return
