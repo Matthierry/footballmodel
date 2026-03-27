@@ -7,7 +7,7 @@ import polars as pl
 
 from footballmodel.config.runtime_env import resolve_raw_data_paths
 from footballmodel.config.settings import load_app_config
-from footballmodel.ingestion.clubelo import load_clubelo_csv
+from footballmodel.ingestion.clubelo import build_clubelo_raw_file, load_clubelo_csv
 from footballmodel.ingestion.football_data import build_football_data_raw_file, load_football_data_csv
 from footballmodel.live.monitoring import (
     build_email_alert_events,
@@ -37,6 +37,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip automatic Football-Data ingestion and reuse existing raw file",
     )
+    parser.add_argument(
+        "--clubelo-config",
+        default="config/clubelo_sources.yaml",
+        help="ClubElo source configuration file",
+    )
+    parser.add_argument(
+        "--refresh-clubelo",
+        action="store_true",
+        help="Force ClubElo rebuild even when raw file already exists",
+    )
+    parser.add_argument(
+        "--skip-clubelo-fetch",
+        action="store_true",
+        help="Skip automatic ClubElo ingestion and reuse existing raw file",
+    )
     return parser.parse_args()
 
 
@@ -61,6 +76,29 @@ def main() -> None:
             )
         except Exception as exc:  # noqa: BLE001
             print(f"Football-Data ingestion failed: {exc}")
+            return
+
+    needs_clubelo_refresh = args.refresh_clubelo or not elo_path.exists()
+    if needs_clubelo_refresh and args.skip_clubelo_fetch:
+        print("ClubElo raw file missing/stale and --skip-clubelo-fetch is set; cannot continue safely")
+        return
+    if needs_clubelo_refresh:
+        if not matches_path.exists():
+            print(f"ClubElo build requires matches at {matches_path}, but file is missing")
+            return
+        try:
+            clubelo_result = build_clubelo_raw_file(
+                config_path=args.clubelo_config,
+                output_path=elo_path,
+                football_data_path=matches_path,
+                snapshots_dir=elo_path.parent / "clubelo_sources",
+            )
+            print(
+                f"Built {elo_path} from {len(clubelo_result.fetched_dates)} date snapshots "
+                f"({clubelo_result.rows_written} rows)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"ClubElo ingestion failed: {exc}")
             return
 
     if not matches_path.exists() or not elo_path.exists():

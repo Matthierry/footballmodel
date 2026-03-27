@@ -1,0 +1,33 @@
+url_template: "http://api.clubelo.com/{date}"
+date_format: "%Y-%m-%d"
+
+# matchdays => fetch snapshots for dates found in football-data raw matches
+# daily => fetch every day between start_date and end_date (inclusive)
+date_frequency: "matchdays"
+
+# optional date fence (ISO format) applied after date collection
+start_date: "2020-07-01"
+end_date: "2030-06-30"
+
+include_match_dates_from_football_data: true
+include_today: true
+persist_snapshots: true
+fail_fast: false
+
+# optional hard-coded extra pulls (e.g. opening day backfill)
+explicit_dates: []
+
+# optional league filter aligned to runtime league codes
+leagues:
+  - ENG1
+  - ENG2
+  - GER1
+  - GER2
+  - ESP1
+  - ESP2
+  - FRA1
+  - FRA2
+  - ITA1
+  - ITA2
+  - POR1
+  - NED1

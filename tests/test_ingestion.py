@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import polars as pl
 import pytest
 
 from footballmodel.ingestion.clubelo import elo_as_of, load_clubelo_csv
+from footballmodel.ingestion.clubelo import build_clubelo_raw_file, load_clubelo_config
 from footballmodel.ingestion.football_data import (
     FOOTBALL_DATA_MAPPING,
     build_football_data_raw_file,
@@ -24,7 +26,7 @@ def test_football_data_ingestion_parses_expected_schema(football_data_csv: Path)
 
 def test_clubelo_ingestion_parses_expected_schema(clubelo_csv: Path):
     df = load_clubelo_csv(clubelo_csv)
-    assert df.columns == ["elo_date", "team", "country", "elo"]
+    assert {"elo_date", "team", "country", "elo"}.issubset(df.columns)
     assert float(df.filter(pl.col("team") == "Manchester City")["elo"][0]) == 1900.0
 
 
@@ -163,4 +165,100 @@ def test_build_football_data_raw_file_fails_when_all_sources_unavailable(tmp_pat
             config_path=cfg_path,
             output_path=tmp_path / "football_data.csv",
             snapshots_dir=tmp_path / "snapshots",
+        )
+
+
+def test_load_clubelo_config_rejects_unknown_frequency(tmp_path: Path):
+    cfg_path = tmp_path / "clubelo_sources.yaml"
+    cfg_path.write_text("date_frequency: hourly\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="date_frequency"):
+        load_clubelo_config(cfg_path)
+
+
+def test_build_clubelo_raw_file_builds_canonical_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    matches_path = tmp_path / "football_data.csv"
+    matches_path.write_text(
+        "\n".join(
+            [
+                "Date,Div,HomeTeam,AwayTeam,FTHG,FTAG",
+                "15/08/2024,ENG1,Manchester City,Manchester United,2,1",
+                "20/08/2024,ENG1,Leeds United,Derby County,1,1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg_path = tmp_path / "clubelo_sources.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "url_template: 'https://elo.test/{date}.csv'",
+                "date_format: '%Y-%m-%d'",
+                "date_frequency: 'matchdays'",
+                "start_date: '2024-08-01'",
+                "end_date: '2024-08-31'",
+                "include_match_dates_from_football_data: true",
+                "include_today: false",
+                "persist_snapshots: true",
+                "fail_fast: true",
+                "leagues: ['ENG1']",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    payloads = {
+        "https://elo.test/2024-08-15.csv": "Rank,Club,Country,Level,Elo,From,To\n1,Manchester City,ENG,1,1900,2024-08-15,2024-08-16\n2,Manchester United,ENG,1,1780,2024-08-15,2024-08-16\n",
+        "https://elo.test/2024-08-20.csv": "Rank,Club,Country,Level,Elo,From,To\n1,Leeds United,ENG,2,1650,2024-08-20,2024-08-21\n2,Derby County,ENG,2,1600,2024-08-20,2024-08-21\n",
+    }
+    monkeypatch.setattr("footballmodel.ingestion.clubelo._fetch_source_csv", lambda url, timeout_seconds=20: payloads[url])
+
+    output_path = tmp_path / "raw" / "clubelo.csv"
+    snapshots_dir = tmp_path / "raw" / "clubelo_sources"
+    result = build_clubelo_raw_file(
+        config_path=cfg_path,
+        output_path=output_path,
+        football_data_path=matches_path,
+        snapshots_dir=snapshots_dir,
+    )
+    df = load_clubelo_csv(output_path)
+
+    assert result.failed_dates == []
+    assert set(result.fetched_dates) == {"2024-08-15", "2024-08-20"}
+    assert {"elo_date", "team", "country", "elo", "source_url", "fetched_at_utc"}.issubset(df.columns)
+    assert df.filter((pl.col("elo_date") == date(2024, 8, 15)) & (pl.col("team") == "Manchester City")).height == 1
+    assert df.filter((pl.col("elo_date") == date(2024, 8, 20)) & (pl.col("team") == "Leeds United")).height == 1
+    assert (snapshots_dir / "2024-08-15.csv").exists()
+    assert (snapshots_dir / "2024-08-20.csv").exists()
+
+
+def test_build_clubelo_raw_file_fails_when_all_dates_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    matches_path = tmp_path / "football_data.csv"
+    matches_path.write_text(
+        "Date,Div,HomeTeam,AwayTeam\n15/08/2024,ENG1,Manchester City,Manchester United\n",
+        encoding="utf-8",
+    )
+    cfg_path = tmp_path / "clubelo_sources.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "url_template: 'https://elo.test/{date}.csv'",
+                "date_frequency: 'matchdays'",
+                "include_match_dates_from_football_data: true",
+                "include_today: false",
+                "fail_fast: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def _raise(_url: str, timeout_seconds: int = 20) -> str:
+        raise RuntimeError("upstream unavailable")
+
+    monkeypatch.setattr("footballmodel.ingestion.clubelo._fetch_source_csv", _raise)
+
+    with pytest.raises(RuntimeError, match="failed for all configured dates"):
+        build_clubelo_raw_file(
+            config_path=cfg_path,
+            output_path=tmp_path / "raw" / "clubelo.csv",
+            football_data_path=matches_path,
+            snapshots_dir=tmp_path / "raw" / "clubelo_sources",
         )
