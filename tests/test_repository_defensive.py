@@ -52,6 +52,65 @@ def test_read_table_or_empty_returns_schema_when_optional_table_absent(tmp_path)
     assert "fixture_id" in model_runs.columns
 
 
+def test_read_table_or_empty_returns_schema_when_optional_table_exists_but_empty(tmp_path):
+    repo = DuckRepository(str(tmp_path / "repo_optional_existing_empty.duckdb"))
+    try:
+        repo.ensure_optional_tables(["benchmark_snapshots", "model_runs", "model_market_predictions"])
+        snapshots = repo.read_table_or_empty("benchmark_snapshots")
+        model_runs = repo.read_table_or_empty("model_runs")
+        market_predictions = repo.read_table_or_empty("model_market_predictions")
+    finally:
+        repo.close()
+
+    assert snapshots.is_empty()
+    assert snapshots.columns == [
+        "fixture_id",
+        "market",
+        "outcome",
+        "line",
+        "benchmark_price",
+        "benchmark_source",
+        "snapshot_type",
+        "snapshot_timestamp_utc",
+    ]
+    assert model_runs.is_empty()
+    assert model_runs.columns == [
+        "fixture_id",
+        "timestamp_utc",
+        "home_team",
+        "away_team",
+        "expected_home_goals",
+        "expected_away_goals",
+        "live_run_id",
+        "run_timestamp_utc",
+        "config_name",
+        "config_version",
+    ]
+    assert market_predictions.is_empty()
+    assert market_predictions.columns == [
+        "live_run_id",
+        "run_timestamp_utc",
+        "config_name",
+        "config_version",
+        "fixture_id",
+        "prediction_timestamp_utc",
+        "market",
+        "outcome",
+        "line",
+        "raw_probability",
+        "calibrated_probability",
+        "calibration_method",
+        "model_fair_odds",
+        "current_price",
+        "benchmark_source",
+        "benchmark_snapshot_type",
+        "benchmark_snapshot_timestamp_utc",
+        "value_flag",
+        "value_status",
+        "edge",
+    ]
+
+
 def test_ensure_optional_tables_bootstraps_expected_tables(tmp_path):
     repo = DuckRepository(str(tmp_path / "repo_bootstrap.duckdb"))
     try:
