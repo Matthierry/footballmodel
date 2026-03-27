@@ -104,7 +104,7 @@ def test_build_football_data_raw_file_merges_sources_and_deduplicates(tmp_path: 
                 "fail_fast: false",
                 "persist_snapshots: true",
                 "url_template: 'https://example.test/{season_code}/{csv_code}.csv'",
-                "upcoming_fixtures_url: 'https://example.test/matches.php'",
+                "upcoming_fixtures_url: 'https://example.test/fixtures.csv'",
                 "include_upcoming_fixtures: true",
                 "sources:",
                 "  - league_code: ENG1",
@@ -123,7 +123,7 @@ def test_build_football_data_raw_file_merges_sources_and_deduplicates(tmp_path: 
             "15/08/2025,E0,Man City,Arsenal,2,1\n"
         ),
         "https://example.test/2526/D1.csv": "Date,Div,HomeTeam,AwayTeam,FTHG,FTAG\n15/08/2025,D1,Bayern,Dortmund,3,2\n",
-        "https://example.test/matches.php": (
+        "https://example.test/fixtures.csv": (
             "Date,Div,HomeTeam,AwayTeam,B365H,B365D,B365A\n"
             "24/08/2026,E0,Chelsea,Liverpool,2.3,3.4,2.9\n"
         ),
@@ -139,16 +139,18 @@ def test_build_football_data_raw_file_merges_sources_and_deduplicates(tmp_path: 
     result = build_football_data_raw_file(config_path=cfg_path, output_path=output_path, snapshots_dir=snapshots_dir)
     merged = load_football_data_csv(output_path)
 
+    assert result.future_fixtures_rows_fetched == 1
     assert result.rows_before_dedup == 4
     assert result.rows_after_dedup == 3
     assert result.future_fixtures_fetched == 1
     assert result.future_fixtures_after_normalization == 1
     assert result.future_fixtures_after_dedup == 1
+    assert result.future_fixtures_with_published_odds == 1
     assert result.failed_sources == []
-    assert "upcoming:matches_php" in result.fetched_sources
+    assert "upcoming:fixtures_csv" in result.fetched_sources
     assert merged.filter((pl.col("league_code") == "ENG1") & (pl.col("source_dataset") == "historical_league_csv")).height == 1
     assert {"league_code", "season_code", "source_url", "fetched_at_utc", "fixture_id"}.issubset(merged.columns)
-    assert merged.filter(pl.col("source_dataset") == "upcoming_fixtures_matches_php").height == 1
+    assert merged.filter(pl.col("source_dataset") == "upcoming_fixtures_csv").height == 1
     assert (snapshots_dir / "2526_ENG1.csv").exists()
     assert (snapshots_dir / "2526_GER1.csv").exists()
     assert (snapshots_dir / "upcoming_matches.csv").exists()
@@ -158,7 +160,7 @@ def test_parse_upcoming_fixtures_payload_normalizes_rows_and_marks_future():
     payload = "Date,Div,HomeTeam,AwayTeam,B365H,B365D,B365A\n28/03/2026,E0,Man City,Arsenal,1.8,3.7,4.5\n"
     parsed, diagnostics = _parse_upcoming_fixtures_payload(
         payload,
-        source_url="https://example.test/matches.php",
+        source_url="https://example.test/fixtures.csv",
         fetched_at_utc="2026-03-27T00:00:00+00:00",
         csv_to_league={"E0": "ENG1"},
     )
@@ -170,21 +172,34 @@ def test_parse_upcoming_fixtures_payload_normalizes_rows_and_marks_future():
     assert row["is_future_fixture"] is True
     assert row["fixture_status"] == "upcoming"
     assert row["odds_capture_type"] == "published_at_source_fetch"
+    assert diagnostics.fetched_rows == 1
     assert diagnostics.fetched_future_rows == 1
     assert diagnostics.future_rows == 1
+    assert diagnostics.future_rows_with_published_odds == 1
 
 
 def test_parse_upcoming_fixtures_payload_parses_datetime_dates():
     payload = "Date,Div,HomeTeam,AwayTeam,B365H,B365D,B365A\n2026-03-28 19:45,E0,Man City,Arsenal,1.8,3.7,4.5\n"
     parsed, diagnostics = _parse_upcoming_fixtures_payload(
         payload,
-        source_url="https://example.test/matches.php",
+        source_url="https://example.test/fixtures.csv",
         fetched_at_utc="2026-03-27T00:00:00+00:00",
         csv_to_league={"E0": "ENG1"},
     )
     assert parsed.height == 1
     assert str(parsed.row(0, named=True)["match_date"]) == "2026-03-28"
     assert diagnostics.future_rows == 1
+
+
+def test_parse_upcoming_fixtures_payload_handles_schema_change_gracefully():
+    payload = "Kickoff,Division,Home,Away\n2026-03-28 19:45,E0,Man City,Arsenal\n"
+    with pytest.raises(RuntimeError, match="fixtures.csv schema changed"):
+        _parse_upcoming_fixtures_payload(
+            payload,
+            source_url="https://example.test/fixtures.csv",
+            fetched_at_utc="2026-03-27T00:00:00+00:00",
+            csv_to_league={"E0": "ENG1"},
+        )
 
 
 def test_build_football_data_raw_file_fails_when_all_sources_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

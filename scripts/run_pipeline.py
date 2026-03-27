@@ -174,9 +174,11 @@ def main() -> None:
             )
             print(
                 "Upcoming fixture retention:"
+                f" rows_fetched={ingestion_result.future_fixtures_rows_fetched}"
                 f" fetched_future={ingestion_result.future_fixtures_fetched}"
                 f" normalized_future={ingestion_result.future_fixtures_after_normalization}"
                 f" deduped_future={ingestion_result.future_fixtures_after_dedup}"
+                f" with_published_odds={ingestion_result.future_fixtures_with_published_odds}"
             )
         except Exception as exc:  # noqa: BLE001
             print(f"Football-Data ingestion failed: {exc}")
@@ -285,7 +287,13 @@ def main() -> None:
     prediction_history_df = pl.DataFrame(prediction_markets)
 
     repo.write_df("curated_matches", matches)
-    print(f"curated_matches retention: future_rows={matches.filter(future_date_expr).height} total_rows={matches.height}")
+    curated_future_with_odds = matches.filter(future_date_expr & has_price_expr).height
+    print(
+        "curated_matches retention:"
+        f" future_rows={matches.filter(future_date_expr).height}"
+        f" future_rows_with_published_odds={curated_future_with_odds}"
+        f" total_rows={matches.height}"
+    )
     repo.write_df("elo_history", elos)
     _append_if_valid(
         repo,

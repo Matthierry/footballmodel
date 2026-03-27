@@ -16,14 +16,19 @@ if password != get_app_password(streamlit_module=st):
     st.stop()
 
 st.title("FootballModel Overview")
-repo = DuckRepository()
+repo: DuckRepository | None = None
 try:
+    repo = DuckRepository()
+
     def _safe_read_table(
         table: str,
         *,
         order_by: str | None = None,
         limit: int | None = None,
     ) -> pl.DataFrame:
+        if repo is None:
+            st.info("Repository unavailable; showing empty fallback state.")
+            return pl.DataFrame([])
         try:
             return repo.read_table_or_empty(table, order_by=order_by, limit=limit)
         except Exception as exc:  # noqa: BLE001
@@ -123,7 +128,14 @@ try:
         st.dataframe(latest_predictions.select(show_cols).head(50))
     else:
         st.info("No model runs yet.")
+except Exception as exc:  # noqa: BLE001
+    st.metric("Latest pipeline run", "Unavailable")
+    st.metric("Canonical match count", 0)
+    st.metric("Upcoming fixtures available", 0)
+    st.metric("Predictions in latest run", 0)
+    st.info(f"Overview fallback activated due to dashboard error: {exc}")
 finally:
-    repo.close()
+    if repo is not None:
+        repo.close()
 
 st.caption("Use pages for 1X2, OU2.5, BTTS, Correct Score, Asian Handicap, Drilldown, Backtest Lab, Experiments, Run Control, and History.")

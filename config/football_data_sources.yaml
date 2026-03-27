@@ -2,7 +2,7 @@ seasons:
   - "2526"
 
 url_template: "https://www.football-data.co.uk/mmz4281/{season_code}/{csv_code}.csv"
-upcoming_fixtures_url: "https://www.football-data.co.uk/matches.php"
+upcoming_fixtures_url: "https://www.football-data.co.uk/fixtures.csv"
 include_upcoming_fixtures: true
 fail_fast: false
 persist_snapshots: true
