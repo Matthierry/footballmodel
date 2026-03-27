@@ -3,12 +3,13 @@ from __future__ import annotations
 import streamlit as st
 import polars as pl
 
+from footballmodel.config.runtime_env import get_app_password
 from footballmodel.storage.repository import DuckRepository
 
 st.set_page_config(page_title="FootballModel", layout="wide")
 
 password = st.sidebar.text_input("Password", type="password")
-if password != st.secrets.get("APP_PASSWORD", "changeme"):
+if password != get_app_password(streamlit_module=st):
     st.warning("Enter valid password to access dashboard")
     st.stop()
 

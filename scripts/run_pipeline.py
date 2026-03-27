@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-from pathlib import Path
 
 import polars as pl
 
+from footballmodel.config.runtime_env import resolve_raw_data_paths
 from footballmodel.config.settings import load_app_config
 from footballmodel.ingestion.clubelo import load_clubelo_csv
 from footballmodel.ingestion.football_data import load_football_data_csv
@@ -37,11 +37,10 @@ def main() -> None:
 
     repo = DuckRepository()
 
-    matches_path = Path("data/raw/football_data.csv")
-    elo_path = Path("data/raw/clubelo.csv")
+    matches_path, elo_path = resolve_raw_data_paths()
 
     if not matches_path.exists() or not elo_path.exists():
-        print("Raw files missing; expected data/raw/football_data.csv and data/raw/clubelo.csv")
+        print(f"Raw files missing; expected {matches_path} and {elo_path}")
         return
 
     matches = load_football_data_csv(matches_path)
