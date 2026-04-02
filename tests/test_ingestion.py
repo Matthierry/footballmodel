@@ -10,6 +10,7 @@ from footballmodel.ingestion.clubelo import elo_as_of, load_clubelo_csv
 from footballmodel.ingestion.clubelo import build_clubelo_raw_file, load_clubelo_config
 from footballmodel.ingestion.football_data import (
     FOOTBALL_DATA_MAPPING,
+    _normalize_football_data_df,
     _parse_upcoming_fixtures_payload,
     build_football_data_raw_file,
     load_football_data_config,
@@ -55,6 +56,29 @@ def test_load_football_data_csv_maps_source_div_to_league_code_for_canonical_row
     assert row["league_code"] == "ENG1"
     assert row["league"] == "ENG1"
     assert row["fixture_id"].startswith("ENG1_")
+
+
+def test_normalize_football_data_df_does_not_require_league_code_before_mapping():
+    raw_df = pl.DataFrame(
+        {
+            "Date": ["24/08/2026"],
+            "HomeTeam": ["Chelsea"],
+            "AwayTeam": ["Liverpool"],
+            "B365H": [2.3],
+            "B365D": [3.4],
+            "B365A": [2.9],
+        }
+    )
+
+    normalized = _normalize_football_data_df(
+        raw_df,
+        source_url="https://example.test/fixtures.csv",
+        fetched_at_utc="2026-04-02T00:00:00+00:00",
+    )
+    row = normalized.row(0, named=True)
+    assert row["source_div"] is None
+    assert row["league_code"] is None
+    assert row["fixture_id"].endswith("_Chelsea_Liverpool")
 
 
 def test_clubelo_ingestion_parses_expected_schema(clubelo_csv: Path):
