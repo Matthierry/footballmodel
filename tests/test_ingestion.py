@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -23,6 +23,18 @@ def test_football_data_ingestion_parses_expected_schema(football_data_csv: Path)
     assert {"fixture_id", "match_date", "home_team", "away_team", "home_goals", "away_goals"}.issubset(df.columns)
     assert df["home_team"].to_list()[0] == "Man City"
     assert str(df["match_date"][0]) == "2024-08-15"
+
+
+def test_load_football_data_csv_sanitizes_bom_prefixed_historical_div_header(tmp_path: Path):
+    csv_path = tmp_path / "historical_with_bom.csv"
+    csv_path.write_text(
+        "\ufeffDiv,Date,HomeTeam,AwayTeam,FTHG,FTAG\nE0,15/08/2025,Man City,Arsenal,2,1\n",
+        encoding="utf-8",
+    )
+    df = load_football_data_csv(csv_path)
+    row = df.row(0, named=True)
+    assert row["source_div"] == "E0"
+    assert row["league_code"] == "E0"
 
 
 def test_clubelo_ingestion_parses_expected_schema(clubelo_csv: Path):
@@ -161,7 +173,8 @@ def test_build_football_data_raw_file_merges_sources_and_deduplicates(tmp_path: 
 
 
 def test_parse_upcoming_fixtures_payload_normalizes_rows_and_marks_future():
-    payload = "Date,Div,HomeTeam,AwayTeam,B365H,B365D,B365A\n28/03/2026,E0,Man City,Arsenal,1.8,3.7,4.5\n"
+    fixture_day = (date.today() + timedelta(days=3)).strftime("%d/%m/%Y")
+    payload = f"Date,Div,HomeTeam,AwayTeam,B365H,B365D,B365A\n{fixture_day},E0,Man City,Arsenal,1.8,3.7,4.5\n"
     parsed, diagnostics = _parse_upcoming_fixtures_payload(
         payload,
         source_url="https://example.test/fixtures.csv",
@@ -187,7 +200,11 @@ def test_parse_upcoming_fixtures_payload_normalizes_rows_and_marks_future():
 
 
 def test_parse_upcoming_fixtures_payload_parses_datetime_dates():
-    payload = "Date,Div,HomeTeam,AwayTeam,B365H,B365D,B365A\n2026-03-28 19:45,E0,Man City,Arsenal,1.8,3.7,4.5\n"
+    fixture_date = date.today() + timedelta(days=4)
+    payload = (
+        "Date,Div,HomeTeam,AwayTeam,B365H,B365D,B365A\n"
+        f"{fixture_date.isoformat()} 19:45,E0,Man City,Arsenal,1.8,3.7,4.5\n"
+    )
     parsed, diagnostics = _parse_upcoming_fixtures_payload(
         payload,
         source_url="https://example.test/fixtures.csv",
@@ -195,8 +212,29 @@ def test_parse_upcoming_fixtures_payload_parses_datetime_dates():
         csv_to_league={"E0": "ENG1"},
     )
     assert parsed.height == 1
-    assert str(parsed.row(0, named=True)["match_date"]) == "2026-03-28"
+    assert str(parsed.row(0, named=True)["match_date"]) == fixture_date.isoformat()
     assert diagnostics.future_rows == 1
+
+
+def test_parse_upcoming_fixtures_payload_sanitizes_bom_prefixed_div_header():
+    fixture_day = (date.today() + timedelta(days=2)).strftime("%d/%m/%Y")
+    payload = f"\ufeffDiv,Date,HomeTeam,AwayTeam,B365H,B365D,B365A\nE0,{fixture_day},Wigan,Reading,2.4,3.3,2.9\n"
+    parsed, diagnostics = _parse_upcoming_fixtures_payload(
+        payload,
+        source_url="https://example.test/fixtures.csv",
+        fetched_at_utc="2026-04-01T00:00:00+00:00",
+        csv_to_league={"E0": "ENG1"},
+    )
+
+    row = parsed.row(0, named=True)
+    assert row["source_div"] == "E0"
+    assert row["league_code"] == "ENG1"
+    assert row["league"] == "ENG1"
+    assert diagnostics.bom_header_sanitized is True
+    assert diagnostics.sanitized_header_count == 1
+    assert diagnostics.raw_div_column_found is True
+    assert diagnostics.source_div_populated_rows == 1
+    assert diagnostics.league_code_populated_rows == 1
 
 
 def test_parse_upcoming_fixtures_payload_handles_schema_change_gracefully():

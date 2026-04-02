@@ -89,6 +89,8 @@ class UpcomingFixturesParseDiagnostics:
     source_div_populated_rows: int
     league_code_populated_rows: int
     mapped_league_code_rows: int
+    bom_header_sanitized: bool
+    sanitized_header_count: int
 
 
 def load_football_data_config(path: str | Path) -> FootballDataConfig:
@@ -221,6 +223,17 @@ def _normalize_football_data_df(
     return df
 
 
+def _sanitize_csv_headers(df: pl.DataFrame) -> tuple[pl.DataFrame, bool, int]:
+    rename_map: dict[str, str] = {}
+    for column in df.columns:
+        sanitized = str(column).lstrip("\ufeff").strip()
+        if sanitized != column:
+            rename_map[column] = sanitized
+    if not rename_map:
+        return df, False, 0
+    return df.rename(rename_map), True, len(rename_map)
+
+
 def _map_div_to_league_code_expr(column: str, *, csv_to_league: dict[str, str]) -> pl.Expr:
     return (
         pl.col(column)
@@ -266,6 +279,7 @@ def _is_canonical_frame(df: pl.DataFrame) -> bool:
 
 def load_football_data_csv(path: str | Path) -> pl.DataFrame:
     raw_df = pl.read_csv(path, ignore_errors=True)
+    raw_df, _, _ = _sanitize_csv_headers(raw_df)
     if _is_canonical_frame(raw_df):
         df = raw_df
         if "match_date" in df.columns:
@@ -289,8 +303,14 @@ def _parse_upcoming_fixtures_payload(
     fetched_at_utc: str,
     csv_to_league: dict[str, str],
 ) -> tuple[pl.DataFrame, UpcomingFixturesParseDiagnostics]:
+    first_line = payload.splitlines()[0] if payload else ""
+    payload_has_bom_header = "\ufeff" in first_line
     try:
         raw_frame = pl.read_csv(BytesIO(payload.encode("utf-8")), ignore_errors=True)
+        raw_frame, bom_header_sanitized, sanitized_header_count = _sanitize_csv_headers(raw_frame)
+        if payload_has_bom_header and not bom_header_sanitized:
+            bom_header_sanitized = True
+            sanitized_header_count = max(sanitized_header_count, 1)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Unable to parse upcoming fixtures payload from Football-Data fixtures CSV") from exc
 
@@ -305,6 +325,8 @@ def _parse_upcoming_fixtures_payload(
             source_div_populated_rows=0,
             league_code_populated_rows=0,
             mapped_league_code_rows=0,
+            bom_header_sanitized=bom_header_sanitized,
+            sanitized_header_count=sanitized_header_count,
         )
 
     lower_to_original = {str(col).strip().lower(): str(col) for col in raw_frame.columns}
@@ -376,6 +398,8 @@ def _parse_upcoming_fixtures_payload(
         source_div_populated_rows=source_div_rows,
         league_code_populated_rows=league_code_rows,
         mapped_league_code_rows=mapped_league_rows,
+        bom_header_sanitized=bom_header_sanitized,
+        sanitized_header_count=sanitized_header_count,
     )
     return cleaned, diagnostics
 
@@ -410,6 +434,8 @@ def build_football_data_raw_file(
     source_div_populated_rows = 0
     league_code_populated_rows = 0
     mapped_league_code_rows = 0
+    bom_header_sanitized = False
+    sanitized_header_count = 0
 
     for season_code in cfg.seasons:
         for source in cfg.sources:
@@ -418,6 +444,7 @@ def build_football_data_raw_file(
             try:
                 csv_text = _fetch_source_csv(url, timeout_seconds=request_timeout_seconds)
                 raw_df = pl.read_csv(BytesIO(csv_text.encode("utf-8")), ignore_errors=True)
+                raw_df, _, _ = _sanitize_csv_headers(raw_df)
                 normalized = _normalize_football_data_df(
                     raw_df,
                     league_code=source.league_code,
@@ -455,6 +482,8 @@ def build_football_data_raw_file(
             source_div_populated_rows = upcoming_diagnostics.source_div_populated_rows
             league_code_populated_rows = upcoming_diagnostics.league_code_populated_rows
             mapped_league_code_rows = upcoming_diagnostics.mapped_league_code_rows
+            bom_header_sanitized = upcoming_diagnostics.bom_header_sanitized
+            sanitized_header_count = upcoming_diagnostics.sanitized_header_count
             if upcoming.height:
                 ingested_frames.append(upcoming)
                 fetched_sources.append(source_id)
@@ -498,6 +527,8 @@ def build_football_data_raw_file(
             f" rows_fetched={future_fixtures_rows_fetched}"
             f" fetched_future_rows={future_fixtures_fetched}"
             f" normalized_rows={upcoming_rows_after_normalization}"
+            f" bom_header_sanitized={bom_header_sanitized}"
+            f" sanitized_header_count={sanitized_header_count}"
             f" raw_div_column_found={raw_div_column_found}"
             f" source_div_rows={source_div_populated_rows}"
             f" league_code_rows={league_code_populated_rows}"
