@@ -243,9 +243,57 @@ def test_parse_upcoming_fixtures_payload_normalizes_rows_and_marks_future():
     assert diagnostics.future_rows_with_published_odds == 1
     assert diagnostics.future_rows_with_league_code == 1
     assert diagnostics.raw_div_column_found is True
+    assert diagnostics.raw_div_populated_rows == 1
     assert diagnostics.source_div_populated_rows == 1
+    assert diagnostics.league_populated_rows == 1
     assert diagnostics.league_code_populated_rows == 1
     assert diagnostics.mapped_league_code_rows == 1
+
+
+def test_build_football_data_raw_file_preserves_div_for_upcoming_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg_path = tmp_path / "football_data_sources.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "seasons: ['2526']",
+                "persist_snapshots: false",
+                "url_template: 'https://example.test/{season_code}/{csv_code}.csv'",
+                "upcoming_fixtures_url: 'https://example.test/fixtures.csv'",
+                "include_upcoming_fixtures: true",
+                "sources:",
+                "  - league_code: ESP2",
+                "    csv_code: SP2",
+                "  - league_code: ENG2",
+                "    csv_code: E1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fixture_day = (date.today() + timedelta(days=5)).strftime("%d/%m/%Y")
+    payloads = {
+        "https://example.test/2526/SP2.csv": "Date,Div,HomeTeam,AwayTeam,FTHG,FTAG\n01/08/2025,SP2,Oviedo,Malaga,1,0\n",
+        "https://example.test/2526/E1.csv": "Date,Div,HomeTeam,AwayTeam,FTHG,FTAG\n01/08/2025,E1,Sunderland,Leeds,1,1\n",
+        "https://example.test/fixtures.csv": (
+            "Date,Div,HomeTeam,AwayTeam,B365H,B365D,B365A\n"
+            f"{fixture_day},E2,Sheffield Wed,Blackburn,2.2,3.2,3.1\n"
+            f"{fixture_day},SP2,Levante,Gijon,2.4,3.1,2.9\n"
+        ),
+    }
+    monkeypatch.setattr(
+        "footballmodel.ingestion.football_data._fetch_source_csv",
+        lambda url, timeout_seconds=20: payloads[url],
+    )
+
+    output_path = tmp_path / "raw" / "football_data.csv"
+    build_football_data_raw_file(config_path=cfg_path, output_path=output_path)
+    merged = load_football_data_csv(output_path, csv_to_league={"SP2": "ESP2", "E1": "ENG2"})
+    upcoming = merged.filter(pl.col("source_dataset") == "upcoming_fixtures_csv")
+
+    assert upcoming.height == 2
+    assert upcoming.filter(pl.col("source_div").is_not_null()).height == 2
+    assert upcoming.filter(pl.col("league_code").is_not_null()).height == 2
+    assert upcoming.filter(pl.col("source_div") == "SP2").select("league_code").item() == "ESP2"
+    assert upcoming.filter(pl.col("source_div") == "E2").select("league_code").item() == "E2"
 
 
 def test_parse_upcoming_fixtures_payload_parses_datetime_dates():
