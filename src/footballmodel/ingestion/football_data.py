@@ -76,6 +76,10 @@ class FootballDataIngestionResult:
     future_fixtures_after_normalization: int
     future_fixtures_after_dedup: int
     future_fixtures_with_published_odds: int
+    future_fixtures_with_league_code_after_normalization: int
+    future_fixtures_with_league_code_after_dedup: int
+    source_div_column_found: bool
+    league_code_created_from_source_div: bool
 
 
 @dataclass(slots=True)
@@ -89,6 +93,7 @@ class UpcomingFixturesParseDiagnostics:
     source_div_populated_rows: int
     league_code_populated_rows: int
     mapped_league_code_rows: int
+    future_rows_with_league_code: int
     bom_header_sanitized: bool
     sanitized_header_count: int
 
@@ -243,6 +248,35 @@ def _map_div_to_league_code_expr(column: str, *, csv_to_league: dict[str, str]) 
     )
 
 
+def _ensure_canonical_league_fields(
+    df: pl.DataFrame,
+    *,
+    csv_to_league: dict[str, str] | None = None,
+    prefer_source_div: bool = False,
+) -> pl.DataFrame:
+    csv_to_league = csv_to_league or {}
+    candidate_exprs: list[pl.Expr] = []
+    if "league_code" in df.columns:
+        candidate_exprs.append(pl.col("league_code").cast(pl.Utf8, strict=False).str.strip_chars())
+    if "source_div" in df.columns:
+        candidate_exprs.append(_map_div_to_league_code_expr("source_div", csv_to_league=csv_to_league))
+    if not prefer_source_div and "league" in df.columns:
+        candidate_exprs.append(_map_div_to_league_code_expr("league", csv_to_league=csv_to_league))
+    elif "league" in df.columns:
+        candidate_exprs.append(_map_div_to_league_code_expr("league", csv_to_league=csv_to_league))
+
+    if candidate_exprs:
+        league_code_expr = pl.coalesce(candidate_exprs).alias("league_code")
+    else:
+        league_code_expr = pl.lit(None, dtype=pl.Utf8).alias("league_code")
+
+    league_candidates: list[pl.Expr] = []
+    league_candidates.append(pl.col("league_code").cast(pl.Utf8, strict=False))
+    if "league" in df.columns:
+        league_candidates.append(pl.col("league").cast(pl.Utf8, strict=False).str.strip_chars())
+    return df.with_columns(league_code_expr).with_columns(pl.coalesce(league_candidates).alias("league"))
+
+
 def _normalize_upcoming_fixtures_df(
     raw_df: pl.DataFrame,
     *,
@@ -255,13 +289,8 @@ def _normalize_upcoming_fixtures_df(
         source_url=source_url,
         fetched_at_utc=fetched_at_utc,
     )
-    league_source_column = "source_div" if "source_div" in normalized.columns else "league"
-    normalized = normalized.with_columns(
-        _map_div_to_league_code_expr(league_source_column, csv_to_league=csv_to_league).alias("league_code")
-    )
-    normalized = normalized.with_columns(
-        pl.col("league_code").cast(pl.Utf8, strict=False).alias("league"),
-    )
+    normalized = normalized.with_columns(pl.lit(None, dtype=pl.Utf8).alias("league_code"))
+    normalized = _ensure_canonical_league_fields(normalized, csv_to_league=csv_to_league, prefer_source_div=True)
     normalized = normalized.with_columns(
         pl.lit(None, dtype=pl.Utf8).alias("season_code"),
         pl.lit(False).alias("is_played"),
@@ -277,11 +306,11 @@ def _is_canonical_frame(df: pl.DataFrame) -> bool:
     return set(REQUIRED_CANONICAL_COLUMNS).issubset(df.columns)
 
 
-def load_football_data_csv(path: str | Path) -> pl.DataFrame:
+def load_football_data_csv(path: str | Path, *, csv_to_league: dict[str, str] | None = None) -> pl.DataFrame:
     raw_df = pl.read_csv(path, ignore_errors=True)
     raw_df, _, _ = _sanitize_csv_headers(raw_df)
     if _is_canonical_frame(raw_df):
-        df = raw_df
+        df = _ensure_canonical_league_fields(raw_df, csv_to_league=csv_to_league, prefer_source_div=True)
         if "match_date" in df.columns:
             df = df.with_columns(_safe_date_parse_expr("match_date").alias("match_date"))
         if "fixture_id" not in df.columns:
@@ -325,6 +354,7 @@ def _parse_upcoming_fixtures_payload(
             source_div_populated_rows=0,
             league_code_populated_rows=0,
             mapped_league_code_rows=0,
+            future_rows_with_league_code=0,
             bom_header_sanitized=bom_header_sanitized,
             sanitized_header_count=sanitized_header_count,
         )
@@ -373,6 +403,11 @@ def _parse_upcoming_fixtures_payload(
     has_price_expr = pl.any_horizontal([pl.col(c).is_not_null() for c in odds_cols]) if odds_cols else pl.lit(False)
     future_rows = cleaned.filter(pl.col("match_date") >= pl.lit(today)).height
     future_rows_with_published_odds = cleaned.filter((pl.col("match_date") >= pl.lit(today)) & has_price_expr).height
+    future_rows_with_league_code = (
+        cleaned.filter((pl.col("match_date") >= pl.lit(today)) & pl.col("league_code").is_not_null()).height
+        if "league_code" in cleaned.columns
+        else 0
+    )
     source_div_rows = cleaned.filter(pl.col("source_div").is_not_null()).height if "source_div" in cleaned.columns else 0
     league_code_rows = cleaned.filter(pl.col("league_code").is_not_null()).height if "league_code" in cleaned.columns else 0
     mapped_league_rows = (
@@ -398,6 +433,7 @@ def _parse_upcoming_fixtures_payload(
         source_div_populated_rows=source_div_rows,
         league_code_populated_rows=league_code_rows,
         mapped_league_code_rows=mapped_league_rows,
+        future_rows_with_league_code=future_rows_with_league_code,
         bom_header_sanitized=bom_header_sanitized,
         sanitized_header_count=sanitized_header_count,
     )
@@ -434,6 +470,7 @@ def build_football_data_raw_file(
     source_div_populated_rows = 0
     league_code_populated_rows = 0
     mapped_league_code_rows = 0
+    future_fixtures_with_league_code_after_normalization = 0
     bom_header_sanitized = False
     sanitized_header_count = 0
 
@@ -482,6 +519,7 @@ def build_football_data_raw_file(
             source_div_populated_rows = upcoming_diagnostics.source_div_populated_rows
             league_code_populated_rows = upcoming_diagnostics.league_code_populated_rows
             mapped_league_code_rows = upcoming_diagnostics.mapped_league_code_rows
+            future_fixtures_with_league_code_after_normalization = upcoming_diagnostics.future_rows_with_league_code
             bom_header_sanitized = upcoming_diagnostics.bom_header_sanitized
             sanitized_header_count = upcoming_diagnostics.sanitized_header_count
             if upcoming.height:
@@ -514,6 +552,15 @@ def build_football_data_raw_file(
         if "source_dataset" in deduped.columns
         else 0
     )
+    future_fixtures_with_league_code_after_dedup = (
+        deduped
+        .filter(pl.col("source_dataset") == "upcoming_fixtures_csv")
+        .filter(pl.col("match_date") >= pl.lit(today))
+        .filter(pl.col("league_code").is_not_null())
+        .height
+        if {"source_dataset", "league_code"}.issubset(set(deduped.columns))
+        else 0
+    )
     deduped.write_csv(output)
 
     if failed_sources:
@@ -533,8 +580,11 @@ def build_football_data_raw_file(
             f" source_div_rows={source_div_populated_rows}"
             f" league_code_rows={league_code_populated_rows}"
             f" mapped_league_code_rows={mapped_league_code_rows}"
+            f" league_code_created_from_source_div={mapped_league_code_rows > 0}"
             f" future_rows_after_normalization={future_fixtures_after_normalization}"
+            f" future_rows_with_league_code_after_normalization={future_fixtures_with_league_code_after_normalization}"
             f" future_rows_after_dedup={future_fixtures_after_dedup}"
+            f" future_rows_with_league_code_after_dedup={future_fixtures_with_league_code_after_dedup}"
             f" future_rows_with_published_odds={future_fixtures_with_published_odds}"
         )
 
@@ -549,4 +599,8 @@ def build_football_data_raw_file(
         future_fixtures_after_normalization=future_fixtures_after_normalization,
         future_fixtures_after_dedup=future_fixtures_after_dedup,
         future_fixtures_with_published_odds=future_fixtures_with_published_odds,
+        future_fixtures_with_league_code_after_normalization=future_fixtures_with_league_code_after_normalization,
+        future_fixtures_with_league_code_after_dedup=future_fixtures_with_league_code_after_dedup,
+        source_div_column_found=raw_div_column_found,
+        league_code_created_from_source_div=mapped_league_code_rows > 0,
     )

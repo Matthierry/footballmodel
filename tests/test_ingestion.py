@@ -37,6 +37,26 @@ def test_load_football_data_csv_sanitizes_bom_prefixed_historical_div_header(tmp
     assert row["league_code"] == "E0"
 
 
+def test_load_football_data_csv_maps_source_div_to_league_code_for_canonical_rows(tmp_path: Path):
+    csv_path = tmp_path / "canonical_upcoming.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "match_date,home_team,away_team,avg_home_odds,avg_draw_odds,avg_away_odds,source_div,season_code,source_url,fetched_at_utc",
+                "2026-08-24,Chelsea,Liverpool,2.3,3.4,2.9,E0,,https://example.test/fixtures.csv,2026-04-02T00:00:00+00:00",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    df = load_football_data_csv(csv_path, csv_to_league={"E0": "ENG1"})
+    row = df.row(0, named=True)
+    assert row["source_div"] == "E0"
+    assert row["league_code"] == "ENG1"
+    assert row["league"] == "ENG1"
+    assert row["fixture_id"].startswith("ENG1_")
+
+
 def test_clubelo_ingestion_parses_expected_schema(clubelo_csv: Path):
     df = load_clubelo_csv(clubelo_csv)
     assert {"elo_date", "team", "country", "elo"}.issubset(df.columns)
@@ -158,6 +178,10 @@ def test_build_football_data_raw_file_merges_sources_and_deduplicates(tmp_path: 
     assert result.future_fixtures_after_normalization == 1
     assert result.future_fixtures_after_dedup == 1
     assert result.future_fixtures_with_published_odds == 1
+    assert result.future_fixtures_with_league_code_after_normalization == 1
+    assert result.future_fixtures_with_league_code_after_dedup == 1
+    assert result.source_div_column_found is True
+    assert result.league_code_created_from_source_div is True
     assert result.failed_sources == []
     assert "upcoming:fixtures_csv" in result.fetched_sources
     assert merged.filter((pl.col("league_code") == "ENG1") & (pl.col("source_dataset") == "historical_league_csv")).height == 1
@@ -193,6 +217,7 @@ def test_parse_upcoming_fixtures_payload_normalizes_rows_and_marks_future():
     assert diagnostics.fetched_future_rows == 1
     assert diagnostics.future_rows == 1
     assert diagnostics.future_rows_with_published_odds == 1
+    assert diagnostics.future_rows_with_league_code == 1
     assert diagnostics.raw_div_column_found is True
     assert diagnostics.source_div_populated_rows == 1
     assert diagnostics.league_code_populated_rows == 1
