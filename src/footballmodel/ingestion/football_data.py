@@ -206,7 +206,29 @@ def _normalize_football_data_df(
     elif "fetched_at_utc" not in df.columns:
         df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("fetched_at_utc"))
 
+    if "league_code" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("league_code"))
+
     if "fixture_id" not in df.columns:
+        source_div_exists = "source_div" in df.columns
+        league_code_exists = "league_code" in df.columns
+        mapping_from_source_div_applied = False
+        if source_div_exists and league_code_exists:
+            mapping_from_source_div_applied = (
+                df.filter(
+                    pl.col("source_div").is_not_null()
+                    & pl.col("league_code").is_not_null()
+                    & (pl.col("source_div").cast(pl.Utf8, strict=False) != pl.col("league_code").cast(pl.Utf8, strict=False))
+                ).height
+                > 0
+            )
+        print(
+            "Fixture id build diagnostics:"
+            f" columns={df.columns}"
+            f" source_div_exists={source_div_exists}"
+            f" league_code_exists={league_code_exists}"
+            f" mapping_from_source_div_applied={mapping_from_source_div_applied}"
+        )
         df = df.with_columns(_build_fixture_id_expr())
 
     if "home_goals" not in df.columns:
