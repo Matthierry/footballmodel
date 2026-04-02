@@ -103,12 +103,17 @@ def test_pipeline_no_predictions_persists_seed_state_without_crashing(monkeypatc
         ),
     )
     monkeypatch.setattr(run_pipeline, "load_app_config", lambda _path: _FakeConfig())
+    monkeypatch.setattr(
+        run_pipeline,
+        "load_football_data_config",
+        lambda _path: SimpleNamespace(sources=[SimpleNamespace(csv_code="E0", league_code="ENG1")]),
+    )
     monkeypatch.setattr(run_pipeline, "DuckRepository", lambda: fake_repo)
     monkeypatch.setattr(run_pipeline, "resolve_raw_data_paths", lambda: (matches_path, elo_path))
     monkeypatch.setattr(
         run_pipeline,
         "load_football_data_csv",
-        lambda _path: pl.DataFrame(
+        lambda _path, **_kwargs: pl.DataFrame(
             {
                 "fixture_id": ["f_hist", "f_upcoming"],
                 "match_date": ["2026-03-20", "2026-03-30"],
@@ -170,6 +175,11 @@ def test_pipeline_bootstrap_with_real_repository_handles_empty_optional_tables(m
         ),
     )
     monkeypatch.setattr(run_pipeline, "load_app_config", lambda _path: _FakeConfig())
+    monkeypatch.setattr(
+        run_pipeline,
+        "load_football_data_config",
+        lambda _path: SimpleNamespace(sources=[SimpleNamespace(csv_code="E0", league_code="ENG1")]),
+    )
     monkeypatch.setattr(run_pipeline, "resolve_raw_data_paths", lambda: (matches_path, elo_path))
     monkeypatch.setattr(
         run_pipeline,
@@ -179,7 +189,7 @@ def test_pipeline_bootstrap_with_real_repository_handles_empty_optional_tables(m
     monkeypatch.setattr(
         run_pipeline,
         "load_football_data_csv",
-        lambda _path: pl.DataFrame(
+        lambda _path, **_kwargs: pl.DataFrame(
             {
                 "fixture_id": ["f_hist", "f_upcoming"],
                 "match_date": ["2026-03-20", "2026-03-30"],
@@ -250,13 +260,18 @@ def test_pipeline_only_scores_future_fixtures_with_published_odds(monkeypatch, t
         ),
     )
     monkeypatch.setattr(run_pipeline, "load_app_config", lambda _path: _FakeConfig())
+    monkeypatch.setattr(
+        run_pipeline,
+        "load_football_data_config",
+        lambda _path: SimpleNamespace(sources=[SimpleNamespace(csv_code="E0", league_code="ENG1")]),
+    )
     monkeypatch.setattr(run_pipeline, "DuckRepository", lambda: fake_repo)
     monkeypatch.setattr(run_pipeline, "resolve_raw_data_paths", lambda: (matches_path, elo_path))
     today = date.today()
     monkeypatch.setattr(
         run_pipeline,
         "load_football_data_csv",
-        lambda _path: pl.DataFrame(
+        lambda _path, **_kwargs: pl.DataFrame(
             {
                 "fixture_id": ["f_hist", "f_past_unplayed", "f_no_odds", "f_has_odds"],
                 "match_date": [

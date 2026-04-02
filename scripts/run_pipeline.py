@@ -8,7 +8,11 @@ import polars as pl
 from footballmodel.config.runtime_env import resolve_raw_data_paths
 from footballmodel.config.settings import load_app_config
 from footballmodel.ingestion.clubelo import build_clubelo_raw_file, load_clubelo_csv
-from footballmodel.ingestion.football_data import build_football_data_raw_file, load_football_data_csv
+from footballmodel.ingestion.football_data import (
+    build_football_data_raw_file,
+    load_football_data_config,
+    load_football_data_csv,
+)
 from footballmodel.live.monitoring import (
     build_email_alert_events,
     build_live_review_rows,
@@ -155,6 +159,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_app_config("config/runtime.yaml")
+    football_data_cfg = load_football_data_config(args.football_data_config)
+    csv_to_league = {source.csv_code: source.league_code for source in football_data_cfg.sources}
     selected_config_name, live_cfg = cfg.resolve_live_config(args.config_name)
 
     repo = DuckRepository()
@@ -177,7 +183,11 @@ def main() -> None:
                 f" rows_fetched={ingestion_result.future_fixtures_rows_fetched}"
                 f" fetched_future={ingestion_result.future_fixtures_fetched}"
                 f" normalized_future={ingestion_result.future_fixtures_after_normalization}"
+                f" source_div_column_found={ingestion_result.source_div_column_found}"
+                f" league_code_created_from_source_div={ingestion_result.league_code_created_from_source_div}"
+                f" normalized_future_with_league_code={ingestion_result.future_fixtures_with_league_code_after_normalization}"
                 f" deduped_future={ingestion_result.future_fixtures_after_dedup}"
+                f" deduped_future_with_league_code={ingestion_result.future_fixtures_with_league_code_after_dedup}"
                 f" with_published_odds={ingestion_result.future_fixtures_with_published_odds}"
             )
         except Exception as exc:  # noqa: BLE001
@@ -211,7 +221,7 @@ def main() -> None:
         print(f"Raw files missing; expected {matches_path} and {elo_path}")
         return
 
-    matches = load_football_data_csv(matches_path)
+    matches = load_football_data_csv(matches_path, csv_to_league=csv_to_league)
     elos = load_clubelo_csv(elo_path)
 
     odds_cols = [c for c in ["avg_home_odds", "avg_draw_odds", "avg_away_odds", "bf_home_odds", "bf_draw_odds", "bf_away_odds"] if c in matches.columns]
