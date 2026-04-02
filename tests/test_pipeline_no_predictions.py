@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -251,13 +252,19 @@ def test_pipeline_only_scores_future_fixtures_with_published_odds(monkeypatch, t
     monkeypatch.setattr(run_pipeline, "load_app_config", lambda _path: _FakeConfig())
     monkeypatch.setattr(run_pipeline, "DuckRepository", lambda: fake_repo)
     monkeypatch.setattr(run_pipeline, "resolve_raw_data_paths", lambda: (matches_path, elo_path))
+    today = date.today()
     monkeypatch.setattr(
         run_pipeline,
         "load_football_data_csv",
         lambda _path: pl.DataFrame(
             {
                 "fixture_id": ["f_hist", "f_past_unplayed", "f_no_odds", "f_has_odds"],
-                "match_date": ["2026-03-20", "2026-03-21", "2026-03-30", "2026-03-31"],
+                "match_date": [
+                    (today - timedelta(days=2)).isoformat(),
+                    (today - timedelta(days=1)).isoformat(),
+                    (today + timedelta(days=2)).isoformat(),
+                    (today + timedelta(days=3)).isoformat(),
+                ],
                 "league": ["ENG1", "E0", "E0", "E0"],
                 "league_code": ["ENG1", "ENG1", "ENG1", "ENG1"],
                 "home_team": ["A", "P", "C", "E"],

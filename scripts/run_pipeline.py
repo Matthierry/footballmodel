@@ -239,6 +239,7 @@ def main() -> None:
         f" curated_future_rows={future_matches_count}"
         f" eligible_future_rows={eligible_future_count}"
         f" eligible_future_with_published_odds={eligible_future_with_odds_count}"
+        f" future_rows_eligible_for_prediction={upcoming.height}"
         f" league_scope_column={league_scope_column}"
         f" league_scoped_for_run={upcoming.height}"
     )
@@ -293,6 +294,7 @@ def main() -> None:
     print(
         "curated_matches retention:"
         f" future_rows={matches.filter(future_date_expr).height}"
+        f" future_rows_written_to_curated_matches={matches.filter(future_date_expr).height}"
         f" future_rows_with_published_odds={curated_future_with_odds}"
         f" total_rows={matches.height}"
     )
