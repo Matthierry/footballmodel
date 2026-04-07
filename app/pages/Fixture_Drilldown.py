@@ -5,10 +5,10 @@ import streamlit as st
 
 from footballmodel.storage.repository import DuckRepository
 from footballmodel.ui_dashboard import (
-    MARKET_GROUPS,
     apply_premium_dark_theme,
+    dark_dataframe,
     load_core_data,
-    prediction_detail_table,
+    render_dark_bar_comparison,
     render_empty_state,
     render_metric_card,
     require_password_gate,
@@ -18,147 +18,237 @@ from footballmodel.ui_dashboard import (
 apply_premium_dark_theme("Fixture Detail", "🎯")
 require_password_gate()
 st.title("Fixture Detail")
-st.caption("Premium deep-dive on one fixture: probabilities, edge signals, and benchmark context.")
+st.caption("Premium deep-dive on one fixture: real model maths vs market benchmarks.")
+
+
+def _fmt_pct(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value * 100:.2f}%"
+
+
+def _fmt_odds(value: float | None, missing: str = "N/A") -> str:
+    if value is None:
+        return missing
+    return f"{value:.3f}"
+
+
+def _safe_implied(price_col: str) -> pl.Expr:
+    return pl.when(pl.col(price_col).is_not_null() & (pl.col(price_col) > 0)).then(1 / pl.col(price_col)).otherwise(None)
+
 
 repo = DuckRepository()
 data = load_core_data(repo)
 review = data["review"]
 snapshots = data["snapshots"]
 runs = data["runs"]
+live_predictions = data["live_predictions"]
+model_predictions = data["model_predictions"]
+model_runs = data["model_runs"]
 
-if review.is_empty() or "fixture_id" not in review.columns:
+base = live_predictions if not live_predictions.is_empty() else model_predictions
+
+if base.is_empty() or "fixture_id" not in base.columns:
     render_empty_state("No fixture-level prediction rows are available yet.")
 else:
-    options = (
-        review.with_columns((pl.col("home_team").fill_null("?") + pl.lit(" vs ") + pl.col("away_team").fill_null("?")).alias("fixture"))
-        .select(["fixture_id", "fixture", "match_date", "league"])
-        .unique(subset=["fixture_id"])
-        .sort("match_date", descending=True)
+    fixtures = (
+        review.select([c for c in ["fixture_id", "home_team", "away_team", "match_date", "league"] if c in review.columns])
+        .unique(subset=["fixture_id"]) if not review.is_empty() else pl.DataFrame([])
     )
-    labels = [f"{r['fixture']} ({r.get('league', 'NA')} · {r.get('match_date', 'NA')})" for r in options.to_dicts()]
-    idx = st.selectbox("Fixture", options=list(range(len(labels))), format_func=lambda x: labels[x])
-    row = options.row(idx, named=True)
-    fixture_id = row["fixture_id"]
+    if fixtures.is_empty():
+        fixtures = base.select([c for c in ["fixture_id"] if c in base.columns]).unique(subset=["fixture_id"]).with_columns(
+            pl.lit("?").alias("home_team"),
+            pl.lit("?").alias("away_team"),
+            pl.lit(None).cast(pl.Date).alias("match_date"),
+            pl.lit("N/A").alias("league"),
+        )
+    fixtures = fixtures.with_columns((pl.col("home_team").fill_null("?") + pl.lit(" vs ") + pl.col("away_team").fill_null("?")).alias("fixture")).sort("match_date", descending=True, nulls_last=True)
 
-    scoped = review.filter(pl.col("fixture_id") == fixture_id)
+    labels = [f"{r.get('fixture', 'N/A')} ({r.get('league', 'N/A')} · {r.get('match_date', 'N/A')})" for r in fixtures.to_dicts()]
+    idx = st.selectbox("Fixture", options=list(range(len(labels))), format_func=lambda x: labels[x])
+    fixture_row = fixtures.row(idx, named=True)
+    fixture_id = fixture_row["fixture_id"]
+
+    scoped = base.filter(pl.col("fixture_id") == fixture_id)
+    if "run_timestamp_utc" in scoped.columns:
+        latest_ts = scoped.select(pl.col("run_timestamp_utc").max().alias("run_timestamp_utc")).row(0, named=True).get("run_timestamp_utc")
+        scoped = scoped.filter(pl.col("run_timestamp_utc") == latest_ts)
+
+    optional_schema: list[tuple[str, pl.DataType, object]] = [
+        ("market", pl.Utf8, "Unavailable"),
+        ("outcome", pl.Utf8, "Unavailable"),
+        ("raw_probability", pl.Float64, None),
+        ("calibrated_probability", pl.Float64, None),
+        ("model_fair_odds", pl.Float64, None),
+        ("current_price", pl.Float64, None),
+        ("edge", pl.Float64, None),
+        ("value_flag", pl.Boolean, False),
+        ("line", pl.Float64, None),
+    ]
+    for col, dtype, default in optional_schema:
+        if col not in scoped.columns:
+            scoped = scoped.with_columns(pl.lit(default).cast(dtype, strict=False).alias(col))
+
+    scoped = scoped.with_columns(
+        pl.col("raw_probability").cast(pl.Float64, strict=False),
+        pl.col("calibrated_probability").cast(pl.Float64, strict=False),
+        pl.col("model_fair_odds").cast(pl.Float64, strict=False),
+        pl.col("current_price").cast(pl.Float64, strict=False),
+        pl.col("edge").cast(pl.Float64, strict=False),
+        pl.col("value_flag").fill_null(False).cast(pl.Boolean),
+        _safe_implied("current_price").alias("market_implied_probability"),
+    )
+
+    probability_col = "calibrated_probability" if "calibrated_probability" in scoped.columns else "raw_probability"
+    scoped = scoped.with_columns(pl.col(probability_col).cast(pl.Float64, strict=False).alias("model_probability"))
+    has_market_level_detail = (
+        ("market" in base.columns)
+        and ("outcome" in base.columns)
+        and ("raw_probability" in base.columns or "calibrated_probability" in base.columns)
+    )
+
     latest_run = runs.row(0, named=True) if runs.height else {}
 
-    h1, h2, h3, h4 = st.columns(4)
+    st.subheader("Fixture hero")
+    h1, h2, h3, h4, h5 = st.columns(5)
     with h1:
-        render_metric_card("Fixture", row.get("fixture", "N/A"), tone="info")
+        render_metric_card("Fixture", fixture_row.get("fixture", "N/A"), tone="info")
     with h2:
-        render_metric_card("Kickoff date", str(row.get("match_date", "N/A")), tone="info")
+        render_metric_card("Kickoff", str(fixture_row.get("match_date", "N/A")), tone="info")
     with h3:
-        render_metric_card("League", str(row.get("league", "N/A")), tone="info")
+        render_metric_card("League", str(fixture_row.get("league", "N/A")), tone="info")
     with h4:
-        value_rows = scoped.filter(pl.col("status") == "Value").height if "status" in scoped.columns else 0
-        render_metric_card("Value signals", value_rows, tone="value" if value_rows else "warn", delta=str(latest_run.get("run_timestamp_utc", "N/A")))
+        run_context = f"{latest_run.get('config_name', 'N/A')} · {latest_run.get('config_version', 'N/A')}"
+        render_metric_card("Run / config", run_context, tone="info", delta=str(scoped.select(pl.col("run_timestamp_utc").max()).item() if "run_timestamp_utc" in scoped.columns and scoped.height else "N/A"))
+    with h5:
+        value_rows = scoped.filter(pl.col("value_flag") & pl.col("edge").is_not_null()).height
+        render_metric_card("Value signals", value_rows, tone="value" if value_rows else "warn")
 
-    st.subheader("Probability distribution")
-    probability_col = "prediction_probability" if "prediction_probability" in scoped.columns else "probability"
-
-    def market_chart(market: str, title: str) -> None:
-        block = scoped.filter(pl.col("market") == market) if "market" in scoped.columns else scoped.head(0)
-        if block.is_empty() or probability_col not in block.columns:
-            render_empty_state(f"{title}: unavailable for this fixture.")
-            return
-        chart_df = block.select(
-            [
-                "outcome",
-                pl.col(probability_col).alias("Model probability"),
-                (pl.when(pl.col("prediction_benchmark_price").is_not_null() & (pl.col("prediction_benchmark_price") > 0)).then(1 / pl.col("prediction_benchmark_price")).otherwise(None)).alias("Market implied"),
-            ]
-        ).to_pandas().set_index("outcome")
-        st.markdown(f"**{title}**")
-        st.bar_chart(chart_df)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        market_chart("1X2", "1X2")
-        market_chart("Over/Under 2.5", "Over/Under 2.5")
-    with c2:
-        market_chart("BTTS", "BTTS")
-        ah = scoped.filter(pl.col("market") == "Asian Handicap") if "market" in scoped.columns else scoped.head(0)
-        st.markdown("**Asian Handicap**")
-        if ah.is_empty():
-            render_empty_state("Asian Handicap not available for this fixture.")
-        else:
-            ah_table = ah.select([c for c in ["outcome", "line", probability_col, "prediction_benchmark_price", "edge", "status"] if c in ah.columns])
-            st.dataframe(ah_table.sort("edge", descending=True, nulls_last=True), use_container_width=True, hide_index=True)
-
-    best = scoped.filter(pl.col("status") == "Value") if "status" in scoped.columns else scoped.head(0)
-    if best.is_empty() and "edge" in scoped.columns:
-        best = scoped.filter(pl.col("edge").is_not_null()).sort("edge", descending=True, nulls_last=True).head(1)
-    else:
-        best = best.sort("edge", descending=True, nulls_last=True).head(1)
-
-    st.subheader("Best opportunity on this fixture")
+    best = scoped.filter(pl.col("edge").is_not_null()).sort("edge", descending=True, nulls_last=True).head(1)
+    st.subheader("Best opportunity")
     if best.is_empty():
-        render_empty_state("No clear opportunity yet (missing benchmark, unavailable edge, or no assessed value).")
+        render_empty_state("No clear edge is available for this fixture yet. Markets may be pending benchmark capture.")
     else:
-        b = best.row(0, named=True)
-        o1, o2, o3 = st.columns(3)
-        with o1:
-            render_metric_card("Market / Outcome", f"{b.get('market', 'N/A')} · {b.get('outcome', 'N/A')}", tone="info")
-        with o2:
-            edge_txt = f"{round(float((b.get('edge') or 0.0) * 100), 2)}%" if b.get("edge") is not None else "N/A"
-            render_metric_card("Edge", edge_txt, tone="value" if (b.get("edge") or 0) > 0 else "neg")
-        with o3:
-            cred = b.get("credibility") or b.get("confidence")
-            render_metric_card("Confidence", f"{round(float(cred * 100), 0)}%" if cred is not None else "N/A", tone="info")
-
+        row = best.row(0, named=True)
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Market / Outcome", f"{row.get('market', 'N/A')} · {row.get('outcome', 'N/A')}")
+        b2.metric("Edge", _fmt_pct(row.get("edge")))
+        b3.metric("Model probability", _fmt_pct(row.get("model_probability")))
+        b4.metric("Market implied", _fmt_pct(row.get("market_implied_probability")))
         st.markdown(
-            f"{status_badge(b.get('status'))} &nbsp;"
-            f"Market odds: **{b.get('prediction_benchmark_price') if b.get('prediction_benchmark_price') is not None else 'Missing benchmark'}** &nbsp;|&nbsp; "
-            f"Model fair odds: **{b.get('model_fair_price') if b.get('model_fair_price') is not None else 'N/A'}**",
+            f"{status_badge('Value' if row.get('value_flag') and row.get('edge') is not None else 'Assessed')} &nbsp; "
+            f"Model fair odds: **{_fmt_odds(row.get('model_fair_odds'))}** &nbsp;|&nbsp; "
+            f"Market odds: **{_fmt_odds(row.get('current_price'), 'Missing benchmark')}**",
             unsafe_allow_html=True,
         )
-        st.caption("Why it matters: a positive edge indicates the model estimates a better-than-market chance at the quoted odds.")
+        st.caption("Standout rationale: this market has the strongest model-vs-market gap on currently available benchmark prices.")
 
-    st.subheader("Market context and odds vs model")
-    compare_cols = [
+    st.subheader("Probability distributions")
+    if not has_market_level_detail:
+        render_empty_state(
+            "Detailed market probability data is unavailable in this dataset view. "
+            "Fixture-level context is shown, but model-vs-market distributions require market-level prediction rows."
+        )
+
+    if has_market_level_detail:
+        def _market_block(market: str, title: str) -> None:
+            block = scoped.filter(pl.col("market") == market)
+            if block.is_empty():
+                render_empty_state(f"{title} unavailable for this fixture.")
+                return
+            chart_df = block.select([
+                pl.col("outcome").cast(pl.Utf8),
+                pl.col("model_probability"),
+                pl.col("market_implied_probability").alias("market_probability"),
+            ])
+            render_dark_bar_comparison(chart_df, title=title)
+            table = block.select([
+                pl.col("outcome"),
+                pl.col("model_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%").alias("model_probability"),
+                pl.when(pl.col("market_implied_probability").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("market_implied_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("market_implied_probability"),
+                pl.when(pl.col("model_fair_odds").is_null()).then(pl.lit("N/A")).otherwise(pl.col("model_fair_odds").round(3).cast(pl.Utf8)).alias("model_fair_odds"),
+                pl.when(pl.col("current_price").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("current_price").round(3).cast(pl.Utf8)).alias("market_odds"),
+                pl.when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).otherwise(pl.col("edge").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("edge"),
+                pl.when(pl.col("value_flag") & pl.col("edge").is_not_null()).then(pl.lit("Value")).otherwise(pl.lit("Assessed")).alias("value_status"),
+            ])
+            dark_dataframe(table)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            _market_block("1X2", "1X2 model vs market")
+            _market_block("Over/Under 2.5", "Over/Under 2.5 model vs market")
+        with c2:
+            _market_block("BTTS", "BTTS model vs market")
+            st.markdown("**Asian Handicap**")
+            ah = scoped.filter(pl.col("market") == "Asian Handicap")
+            if ah.is_empty():
+                render_empty_state("Asian Handicap unavailable for this fixture.")
+            else:
+                ah_table = ah.select([
+                    pl.col("line"),
+                    pl.col("outcome"),
+                    pl.col("model_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%").alias("model_probability"),
+                    pl.when(pl.col("market_implied_probability").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("market_implied_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("market_implied_probability"),
+                    pl.when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).otherwise(pl.col("edge").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("edge"),
+                    pl.when(pl.col("value_flag") & pl.col("edge").is_not_null()).then(pl.lit("Value")).otherwise(pl.lit("Assessed")).alias("value_status"),
+                ]).sort(["line", "edge"], descending=[False, True], nulls_last=True)
+                dark_dataframe(ah_table)
+
+        st.subheader("Model vs market detail")
+        detail = scoped.select([
+            pl.col("market"),
+            pl.col("line"),
+            pl.col("outcome"),
+            pl.col("model_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%").alias("model_probability"),
+            pl.when(pl.col("market_implied_probability").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("market_implied_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("market_implied_probability"),
+            pl.when(pl.col("model_fair_odds").is_null()).then(pl.lit("N/A")).otherwise(pl.col("model_fair_odds").round(3).cast(pl.Utf8)).alias("model_fair_odds"),
+            pl.when(pl.col("current_price").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("current_price").round(3).cast(pl.Utf8)).alias("market_odds"),
+            pl.when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).otherwise(pl.col("edge").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("edge"),
+            pl.when(pl.col("current_price").is_null()).then(pl.lit("Missing benchmark")).when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).when(pl.col("value_flag")).then(pl.lit("Value")).otherwise(pl.lit("Assessed")).alias("status"),
+        ]).sort(["market", "edge"], descending=[False, True], nulls_last=True)
+        dark_dataframe(detail)
+    else:
+        st.subheader("Model vs market detail")
+        render_empty_state("Model-vs-market table unavailable without market-level prediction rows.")
+
+    st.subheader("Correct score probability grid")
+    cs = scoped.filter(pl.col("market") == "Correct Score") if has_market_level_detail else scoped.head(0)
+    if cs.is_empty():
+        render_empty_state("Correct Score probabilities are unavailable for this fixture.")
+    else:
+        cs_grid = cs.select([
+            pl.col("outcome"),
+            pl.col("model_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%").alias("probability"),
+        ]).sort("probability", descending=True)
+        dark_dataframe(cs_grid)
+
+    st.subheader("Technical & context details")
+    team_context_cols = [
         c
         for c in [
-            "market",
-            "outcome",
-            probability_col,
-            "prediction_benchmark_price",
-            "model_fair_price",
-            "edge",
-            "status",
+            "expected_home_goals",
+            "expected_away_goals",
+            "home_shots",
+            "away_shots",
+            "home_shots_on_target",
+            "away_shots_on_target",
+            "credibility",
+            "confidence",
         ]
-        if c in scoped.columns
+        if c in review.columns
     ]
-    st.dataframe(scoped.select(compare_cols).sort(["market", "edge"], descending=[False, True], nulls_last=True), use_container_width=True, hide_index=True)
-
-    st.subheader("Correct Score grid")
-    cs = scoped.filter(pl.col("market") == "Correct Score") if "market" in scoped.columns else scoped.head(0)
-    if cs.is_empty():
-        render_empty_state("Correct score rows are unavailable for this fixture.")
-    else:
-        cs_cols = [c for c in ["outcome", probability_col, "prediction_benchmark_price", "model_fair_price", "edge", "status"] if c in cs.columns]
-        st.dataframe(cs.select(cs_cols).sort("edge", descending=True, nulls_last=True), use_container_width=True, hide_index=True)
-
-    st.subheader("Deeper fixture context")
-    xg_cols = [c for c in ["expected_home_goals", "expected_away_goals", "home_shots", "away_shots", "home_shots_on_target", "away_shots_on_target", "credibility", "confidence"] if c in scoped.columns]
-    if xg_cols:
-        st.dataframe(scoped.select([c for c in ["market", "outcome", *xg_cols, "status"] if c in scoped.columns]), use_container_width=True, hide_index=True)
-    else:
-        render_empty_state("Expected goals / form / shot context unavailable for this fixture.")
-
-    st.markdown("### Technical market tables")
-    for group in ["1X2", "Over/Under 2.5", "BTTS", "Asian Handicap"]:
-        block = scoped.filter(pl.col("market") == group) if "market" in scoped.columns else scoped.head(0)
-        st.markdown(f"**{group}**")
-        if block.is_empty():
-            st.caption("No assessed rows for this market.")
+    context = review.filter(pl.col("fixture_id") == fixture_id) if not review.is_empty() else review
+    if context.is_empty() or not team_context_cols:
+        if not model_runs.is_empty() and "fixture_id" in model_runs.columns:
+            run_ctx = model_runs.filter(pl.col("fixture_id") == fixture_id)
+            if not run_ctx.is_empty():
+                dark_dataframe(run_ctx.select([c for c in ["run_timestamp_utc", "expected_home_goals", "expected_away_goals", "config_name", "config_version"] if c in run_ctx.columns]).head(1))
+            else:
+                render_empty_state("Expected goals, form, and confidence context are unavailable for this fixture.")
         else:
-            st.dataframe(prediction_detail_table(block), use_container_width=True, hide_index=True)
-
-    other = scoped.filter(~pl.col("market").is_in(list(MARKET_GROUPS.keys()))) if "market" in scoped.columns else scoped.head(0)
-    if not other.is_empty():
-        st.markdown("**Other markets**")
-        st.dataframe(prediction_detail_table(other), use_container_width=True, hide_index=True)
+            render_empty_state("Expected goals, form, and confidence context are unavailable for this fixture.")
+    else:
+        dark_dataframe(context.select([c for c in ["market", "outcome", *team_context_cols] if c in context.columns]).head(20))
 
     st.subheader("Benchmarks captured")
     if snapshots.is_empty() or "fixture_id" not in snapshots.columns:
@@ -168,6 +258,6 @@ else:
         if snap.is_empty():
             render_empty_state("No benchmark snapshots found for selected fixture.")
         else:
-            st.dataframe(snap.sort("snapshot_timestamp_utc", descending=True), use_container_width=True, hide_index=True)
+            dark_dataframe(snap.sort("snapshot_timestamp_utc", descending=True))
 
 repo.close()
