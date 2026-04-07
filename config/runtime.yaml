@@ -53,10 +53,17 @@ live_configs:
     version: 2026.03.1
     leagues:
       - ENG1
+      - ENG2
       - GER1
+      - GER2
       - ESP1
+      - ESP2
       - ITA1
+      - ITA2
       - FRA1
+      - FRA2
+      - POR1
+      - NED1
     weights:
       dixon_coles: 0.62
       elo_prior: 0.23
