@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import duckdb
 import polars as pl
 
 from footballmodel.config.runtime_env import resolve_duckdb_path
+
+logger = logging.getLogger(__name__)
 
 
 OPTIONAL_TABLE_SCHEMAS: dict[str, dict[str, pl.DataType]] = {
@@ -212,21 +215,9 @@ class DuckRepository:
     def append_df(self, table: str, df: pl.DataFrame) -> None:
         self._validate_dataframe(table, df, operation="append")
         self.con.register("tmp_df", df.to_arrow())
-        if not self.has_table(table):
-            schema = OPTIONAL_TABLE_SCHEMAS.get(table)
-            if schema is None:
-                self.con.execute(f"create table if not exists {table} as select * from tmp_df where 1=0")
-            else:
-                self.con.register("tmp_empty_df", pl.DataFrame(schema=schema).to_arrow())
-                self.con.execute(f"create table if not exists {table} as select * from tmp_empty_df where 1=0")
-
-        target_columns = self._table_columns(table)
-        source_columns = set(df.columns)
-        target_column_sql = ", ".join(target_columns)
-        select_sql = ", ".join(
-            [column if column in source_columns else f"null as {column}" for column in target_columns]
-        )
-        self.con.execute(f"insert into {table} ({target_column_sql}) select {select_sql} from tmp_df")
+        self._ensure_table_for_dataframe_writes(table)
+        self._migrate_table_to_expected_schema(table)
+        self._insert_aligned_from_tmp_df(table=table, source_columns=df.columns)
 
     def read_df(self, query: str) -> pl.DataFrame:
         # NOTE:
@@ -251,7 +242,8 @@ class DuckRepository:
             return
         self._validate_dataframe("benchmark_snapshots", df, operation="upsert")
         self.con.register("tmp_df", df.to_arrow())
-        self.con.execute("create table if not exists benchmark_snapshots as select * from tmp_df where 1=0")
+        self._ensure_table_for_dataframe_writes("benchmark_snapshots")
+        self._migrate_table_to_expected_schema("benchmark_snapshots")
         self.con.execute(
             """
             delete from benchmark_snapshots as tgt
@@ -263,7 +255,7 @@ class DuckRepository:
               and tgt.line is not distinct from src.line
             """
         )
-        self.con.execute("insert into benchmark_snapshots select * from tmp_df")
+        self._insert_aligned_from_tmp_df(table="benchmark_snapshots", source_columns=df.columns)
 
     @staticmethod
     def _validate_dataframe(table: str, df: pl.DataFrame, operation: str) -> None:
@@ -278,3 +270,76 @@ class DuckRepository:
             row[1]
             for row in self.con.execute(f"pragma table_info('{table}')").fetchall()
         ]
+
+    def _ensure_table_for_dataframe_writes(self, table: str) -> None:
+        if self.has_table(table):
+            return
+        schema = OPTIONAL_TABLE_SCHEMAS.get(table)
+        if schema is None:
+            self.con.execute(f"create table if not exists {self._quote_identifier(table)} as select * from tmp_df where 1=0")
+            return
+        self.con.register("tmp_empty_df", pl.DataFrame(schema=schema).to_arrow())
+        self.con.execute(f"create table if not exists {self._quote_identifier(table)} as select * from tmp_empty_df where 1=0")
+
+    def _migrate_table_to_expected_schema(self, table: str) -> None:
+        expected_schema = OPTIONAL_TABLE_SCHEMAS.get(table)
+        if expected_schema is None or not self.has_table(table):
+            return
+        existing_columns = set(self._table_columns(table))
+        for column, dtype in expected_schema.items():
+            if column in existing_columns:
+                continue
+            duckdb_type = self._duckdb_type_from_polars(dtype)
+            self.con.execute(
+                f"alter table {self._quote_identifier(table)} add column {self._quote_identifier(column)} {duckdb_type}"
+            )
+            logger.info(
+                "Migrated DuckDB table by adding missing column.",
+                extra={"table": table, "column": column, "duckdb_type": duckdb_type},
+            )
+
+    def _insert_aligned_from_tmp_df(self, *, table: str, source_columns: list[str]) -> None:
+        target_columns = self._table_columns(table)
+        source_column_set = set(source_columns)
+        missing_source_columns = [column for column in target_columns if column not in source_column_set]
+        extra_source_columns = sorted(source_column_set - set(target_columns))
+        if missing_source_columns or extra_source_columns:
+            logger.info(
+                "Aligning dataframe and table schemas for DuckDB write.",
+                extra={
+                    "table": table,
+                    "missing_source_columns": missing_source_columns,
+                    "extra_source_columns": extra_source_columns,
+                },
+            )
+
+        target_column_sql = ", ".join(self._quote_identifier(column) for column in target_columns)
+        select_sql = ", ".join(
+            [
+                self._quote_identifier(column)
+                if column in source_column_set
+                else f"null as {self._quote_identifier(column)}"
+                for column in target_columns
+            ]
+        )
+        self.con.execute(
+            f"insert into {self._quote_identifier(table)} ({target_column_sql}) select {select_sql} from tmp_df"
+        )
+
+    @staticmethod
+    def _duckdb_type_from_polars(dtype: pl.DataType) -> str:
+        if dtype == pl.Utf8:
+            return "VARCHAR"
+        if dtype == pl.Float64:
+            return "DOUBLE"
+        if dtype == pl.Int64:
+            return "BIGINT"
+        if dtype == pl.Boolean:
+            return "BOOLEAN"
+        if dtype == pl.Date:
+            return "DATE"
+        raise ValueError(f"Unsupported optional table dtype for DuckDB migration: {dtype}")
+
+    @staticmethod
+    def _quote_identifier(identifier: str) -> str:
+        return f'"{identifier.replace(chr(34), chr(34) * 2)}"'

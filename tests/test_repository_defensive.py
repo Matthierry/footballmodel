@@ -199,3 +199,48 @@ def test_append_df_aligns_columns_for_legacy_model_runs_table(tmp_path):
         "config_version",
     ]
     assert persisted.row(0, named=True)["fixture_id"] == "f_1"
+
+
+def test_append_df_migrates_legacy_model_runs_missing_expected_columns(tmp_path):
+    repo = DuckRepository(str(tmp_path / "repo_legacy_model_runs_missing_columns.duckdb"))
+    try:
+        repo.con.execute(
+            """
+            create table model_runs (
+                fixture_id varchar,
+                timestamp_utc varchar,
+                home_team varchar,
+                away_team varchar,
+                expected_home_goals double,
+                expected_away_goals double,
+                live_run_id varchar,
+                run_timestamp_utc varchar
+            )
+            """
+        )
+        repo.append_df(
+            "model_runs",
+            pl.DataFrame(
+                {
+                    "fixture_id": ["f_2"],
+                    "timestamp_utc": ["2026-04-07T00:00:00+00:00"],
+                    "home_team": ["Gamma"],
+                    "away_team": ["Delta"],
+                    "expected_home_goals": [1.1],
+                    "expected_away_goals": [0.9],
+                    "live_run_id": ["live_2"],
+                    "run_timestamp_utc": ["2026-04-07T00:00:00+00:00"],
+                    "config_name": ["default"],
+                    "config_version": ["v2"],
+                }
+            ),
+        )
+        persisted = repo.read_df("select * from model_runs")
+    finally:
+        repo.close()
+
+    assert "config_name" in persisted.columns
+    assert "config_version" in persisted.columns
+    row = persisted.row(0, named=True)
+    assert row["config_name"] == "default"
+    assert row["config_version"] == "v2"
