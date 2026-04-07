@@ -14,8 +14,9 @@ from footballmodel.backtest.walkforward import (
 )
 from footballmodel.config.settings import load_app_config
 from footballmodel.storage.repository import DuckRepository
-from footballmodel.ui_dashboard import require_password_gate
+from footballmodel.ui_dashboard import apply_premium_dark_theme, render_empty_state, require_password_gate
 
+apply_premium_dark_theme("Experiments")
 require_password_gate()
 st.title("Experiments")
 st.caption("Optimisation sweeps test combinations of weights and thresholds to find robust model settings.")

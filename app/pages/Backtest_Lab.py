@@ -7,8 +7,9 @@ import streamlit as st
 from footballmodel.backtest.walkforward import BacktestRequest, persist_backtest, run_backtest
 from footballmodel.config.settings import load_app_config
 from footballmodel.storage.repository import DuckRepository
-from footballmodel.ui_dashboard import require_password_gate
+from footballmodel.ui_dashboard import apply_premium_dark_theme, render_empty_state, require_password_gate
 
+apply_premium_dark_theme("Backtest Lab")
 require_password_gate()
 st.title("Backtest Lab")
 st.caption("Run walk-forward simulation experiments and compare model settings before promoting changes.")
