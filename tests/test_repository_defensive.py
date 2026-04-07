@@ -26,7 +26,18 @@ def test_append_df_allows_empty_dataframe_with_schema(tmp_path):
         repo.close()
 
     assert persisted_count == 0
-    assert persisted_columns == ["live_run_id", "run_timestamp_utc"]
+    assert persisted_columns == [
+        "fixture_id",
+        "timestamp_utc",
+        "home_team",
+        "away_team",
+        "expected_home_goals",
+        "expected_away_goals",
+        "live_run_id",
+        "run_timestamp_utc",
+        "config_name",
+        "config_version",
+    ]
 
 
 def test_read_table_or_empty_returns_schema_when_optional_table_absent(tmp_path):
@@ -128,3 +139,63 @@ def test_ensure_optional_tables_bootstraps_expected_tables(tmp_path):
         repo.close()
 
     assert created == {"benchmark_snapshots", "model_runs", "model_market_predictions"}
+
+
+def test_append_df_aligns_columns_for_legacy_model_runs_table(tmp_path):
+    repo = DuckRepository(str(tmp_path / "repo_legacy_model_runs.duckdb"))
+    try:
+        repo.con.execute(
+            """
+            create table model_runs (
+                fixture_id varchar,
+                timestamp_utc varchar,
+                home_team varchar,
+                away_team varchar,
+                expected_home_goals double,
+                expected_away_goals double,
+                live_run_id varchar,
+                run_timestamp_utc varchar,
+                config_name varchar,
+                config_version varchar
+            )
+            """
+        )
+        repo.append_df(
+            "model_runs",
+            pl.DataFrame(
+                {
+                    "fixture_id": ["f_1"],
+                    "timestamp_utc": ["2026-04-07T00:00:00+00:00"],
+                    "home_team": ["Alpha"],
+                    "away_team": ["Beta"],
+                    "expected_home_goals": [1.23],
+                    "expected_away_goals": [0.87],
+                    "live_run_id": ["live_1"],
+                    "run_timestamp_utc": ["2026-04-07T00:00:00+00:00"],
+                    "config_name": ["default"],
+                    "config_version": ["v1"],
+                    "score_matrix": [[[0.1, 0.2], [0.3, 0.4]]],
+                    "markets": [[{"market": "1X2", "outcome": "H"}]],
+                    "correct_score_top5": [[{"score": "1-0", "prob": 0.12}]],
+                    "asian_handicap": [[{"line": -0.5, "home_prob": 0.55}]],
+                }
+            ),
+        )
+        persisted = repo.read_df("select * from model_runs")
+    finally:
+        repo.close()
+
+    assert persisted.height == 1
+    assert persisted.columns == [
+        "fixture_id",
+        "timestamp_utc",
+        "home_team",
+        "away_team",
+        "expected_home_goals",
+        "expected_away_goals",
+        "live_run_id",
+        "run_timestamp_utc",
+        "config_name",
+        "config_version",
+    ]
+    assert persisted.row(0, named=True)["fixture_id"] == "f_1"
