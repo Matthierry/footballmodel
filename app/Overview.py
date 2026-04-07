@@ -5,137 +5,78 @@ from datetime import date
 import polars as pl
 import streamlit as st
 
-from footballmodel.config.runtime_env import get_app_password
 from footballmodel.storage.repository import DuckRepository
+from footballmodel.ui_dashboard import (
+    MARKET_ORDER,
+    load_core_data,
+    market_breakdown,
+    prediction_display_table,
+    require_password_gate,
+    today_scope,
+)
 
-st.set_page_config(page_title="FootballModel", layout="wide")
+st.set_page_config(page_title="Stattack Dashboard", layout="wide")
+require_password_gate()
 
-password = st.sidebar.text_input("Password", type="password")
-if password != get_app_password(streamlit_module=st):
-    st.warning("Enter valid password to access dashboard")
-    st.stop()
+st.title("Dashboard")
+st.caption("Daily football model workflow: review today's opportunities, inspect fixtures, run pipeline, and audit outcomes.")
 
-st.title("FootballModel Overview")
 repo: DuckRepository | None = None
 try:
     repo = DuckRepository()
+    data = load_core_data(repo)
+    review = data["review"]
+    runs = data["runs"]
+    matches = data["matches"]
 
-    def _safe_read_table(
-        table: str,
-        *,
-        order_by: str | None = None,
-        limit: int | None = None,
-    ) -> pl.DataFrame:
-        if repo is None:
-            st.info("Repository unavailable; showing empty fallback state.")
-            return pl.DataFrame([])
-        try:
-            return repo.read_table_or_empty(table, order_by=order_by, limit=limit)
-        except Exception as exc:  # noqa: BLE001
-            st.info(f"Could not read table '{table}': {exc}")
-            return pl.DataFrame([])
+    latest_run = runs.row(0, named=True) if runs.height else {}
+    today = today_scope(review)
+    today_fixtures = today.select("fixture_id").n_unique() if "fixture_id" in today.columns and today.height else 0
 
-    latest_summary = _safe_read_table("live_run_summaries_history", order_by="run_timestamp_utc desc", limit=1)
-    latest_predictions = _safe_read_table("model_runs", order_by="run_timestamp_utc desc, timestamp_utc desc", limit=500)
-    matches = _safe_read_table("curated_matches")
-    snapshots = _safe_read_table("benchmark_snapshots")
+    upcoming_fixtures = 0
+    if not matches.is_empty() and "match_date" in matches.columns:
+        upcoming_fixtures = matches.filter(pl.col("match_date") >= pl.lit(date.today())).height
 
-    latest_summary_row = latest_summary.row(0, named=True) if latest_summary.height else None
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Latest run status", "OK" if runs.height else "No runs yet")
+    k2.metric("Last successful run", str(latest_run.get("run_timestamp_utc", "N/A")))
+    k3.metric("Fixtures in scope today", today_fixtures)
+    k4.metric("Assessed selections today", today.height)
+    value_count = today.filter(today["value_flag"] == True).height if today.height and "value_flag" in today.columns else 0
+    k5.metric("Value selections today", value_count)
 
-    if latest_summary_row:
-        st.metric("Latest pipeline run", f"Completed @ {latest_summary_row['run_timestamp_utc']}")
-        st.caption(
-            f"Config: {latest_summary_row.get('config_name') or 'unknown'} "
-            f"(version {latest_summary_row.get('config_version') or 'unknown'})"
-        )
-        st.metric(
-            "Latest live run summary",
-            (
-                f"fixtures={latest_summary_row.get('fixtures_scored', 0) or 0}, "
-                f"markets={latest_summary_row.get('market_predictions', 0) or 0}, "
-                f"review={latest_summary_row.get('review_rows', 0) or 0}"
-            ),
-        )
-    else:
-        st.metric("Latest pipeline run", "No run summary available yet")
-        st.metric("Latest live run summary", "No run summary available yet")
-        st.info("Pipeline summary table is empty; run the pipeline to populate latest run status.")
-
-    st.metric("Canonical match count", matches.height)
-    if matches.height == 0:
-        st.info("curated_matches is empty; run ingestion/build to populate the canonical dataset.")
-
-    latest_refresh = (
-        matches.select("fetched_at_utc").drop_nulls().sort("fetched_at_utc", descending=True).head(1)
-        if "fetched_at_utc" in matches.columns
-        else matches.head(0)
-    )
-    if latest_refresh.height:
-        st.metric("Latest raw refresh/build", str(latest_refresh["fetched_at_utc"][0]))
-    else:
-        st.metric("Latest raw refresh/build", "No refresh timestamp available")
-        st.info("Raw ingestion metadata is empty; verify Football-Data/ClubElo refresh completed.")
-
-    upcoming_count = 0
-    if matches.height:
-        future_expr = (
-            pl.col("is_future_fixture")
-            if "is_future_fixture" in matches.columns
-            else (pl.col("home_goals").is_null() & pl.col("away_goals").is_null())
-        )
-        if "match_date" in matches.columns:
-            upcoming_count = matches.filter(future_expr & (pl.col("match_date") >= pl.lit(date.today()))).height
-        else:
-            upcoming_count = matches.filter(future_expr).height
-    st.metric("Upcoming fixtures available", upcoming_count)
-    if upcoming_count == 0:
-        st.info("No upcoming fixtures are currently available in curated_matches.")
-
-    latest_predictions_count = 0
-    if latest_summary_row:
-        latest_predictions_count = int(latest_summary_row.get("market_predictions") or 0)
-    st.metric("Predictions in latest run", latest_predictions_count)
-    if latest_predictions_count == 0:
+    st.metric("Upcoming fixtures available", upcoming_fixtures)
+    predictions_count = int(latest_run.get("market_predictions", 0) or 0)
+    st.metric("Predictions in latest run", predictions_count)
+    if predictions_count == 0:
         st.info("Latest run produced zero market predictions.")
 
-    st.metric("Benchmark snapshots stored", snapshots.height)
-    if snapshots.height == 0:
-        st.info("No benchmark snapshots stored yet.")
-
-    latest_config_name = None
-    latest_config_version = None
-    if latest_summary_row:
-        latest_config_name = latest_summary_row.get("config_name")
-        latest_config_version = latest_summary_row.get("config_version")
-    elif latest_predictions.height:
-        latest_config_name = latest_predictions["config_name"][0] if "config_name" in latest_predictions.columns else None
-        latest_config_version = (
-            latest_predictions["config_version"][0] if "config_version" in latest_predictions.columns else None
-        )
-    if latest_config_name or latest_config_version:
-        st.metric("Latest live config", f"{latest_config_name or 'unknown'} / {latest_config_version or 'unknown'}")
+    st.subheader("Value opportunities by market")
+    breakdown = market_breakdown(today)
+    if breakdown.is_empty():
+        st.info("No eligible fixtures are in scope today. This usually means the latest run found no upcoming fixtures or benchmarks.")
     else:
-        st.metric("Latest live config", "Not available")
-        st.info("No live config metadata found yet.")
+        show = {row["market"]: row["value"] for row in breakdown.to_dicts()}
+        cols = st.columns(len(MARKET_ORDER))
+        for idx, market in enumerate(MARKET_ORDER):
+            cols[idx].metric(market, int(show.get(market, 0)))
 
-    st.subheader("Recent run predictions")
-    if latest_predictions.height:
-        show_cols = [
-            c
-            for c in ["fixture_id", "home_team", "away_team", "expected_home_goals", "expected_away_goals", "run_timestamp_utc"]
-            if c in latest_predictions.columns
-        ]
-        st.dataframe(latest_predictions.select(show_cols).head(50))
+    st.subheader("Top value opportunities today")
+    top = today.filter(today["value_flag"] == True) if today.height and "value_flag" in today.columns else today.head(0)
+    if top.is_empty():
+        st.info("No value selections are currently flagged for today's fixture set.")
     else:
-        st.info("No model runs yet.")
+        if "edge" in top.columns:
+            top = top.sort("edge", descending=True)
+        st.dataframe(prediction_display_table(top).head(20), use_container_width=True)
+
+    st.subheader("Quick actions")
+    st.markdown("- Open **Today's Value Bets** page\n- Open **Fixture Detail** page\n- Open **Run Control** page\n- Open **History** page")
+
+    if matches.is_empty():
+        st.info("No curated fixture dataset found yet. Run pipeline ingestion before relying on dashboard metrics.")
 except Exception as exc:  # noqa: BLE001
-    st.metric("Latest pipeline run", "Unavailable")
-    st.metric("Canonical match count", 0)
-    st.metric("Upcoming fixtures available", 0)
-    st.metric("Predictions in latest run", 0)
-    st.info(f"Overview fallback activated due to dashboard error: {exc}")
+    st.info(f"Dashboard fallback activated due to error: {exc}")
 finally:
     if repo is not None:
         repo.close()
-
-st.caption("Use pages for 1X2, OU2.5, BTTS, Correct Score, Asian Handicap, Drilldown, Backtest Lab, Experiments, Run Control, and History.")
