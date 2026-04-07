@@ -30,6 +30,46 @@ def test_benchmark_snapshot_upsert_and_missing_source(tmp_path):
     assert stored["snapshot_timestamp_utc"].n_unique() == 1
 
 
+def test_benchmark_snapshot_upsert_aligns_legacy_table_schema(tmp_path):
+    repo = DuckRepository(str(tmp_path / "snap_legacy.duckdb"))
+    try:
+        repo.con.execute(
+            """
+            create table benchmark_snapshots (
+                fixture_id varchar,
+                market varchar,
+                outcome varchar,
+                line double,
+                benchmark_price double,
+                benchmark_source varchar,
+                snapshot_type varchar,
+                snapshot_timestamp_utc varchar
+            )
+            """
+        )
+        legacy_plus_extra = pl.DataFrame(
+            {
+                "fixture_id": ["fx_legacy"],
+                "market": ["1X2"],
+                "outcome": ["H"],
+                "line": [None],
+                "benchmark_price": [2.12],
+                "benchmark_source": ["exchange"],
+                "snapshot_type": [SNAPSHOT_TYPE_PREDICTION_TIME],
+                "snapshot_timestamp_utc": ["2026-04-07T12:00:00+00:00"],
+                "unused_new_column": ["extra_payload"],
+            }
+        )
+        repo.upsert_benchmark_snapshots(legacy_plus_extra)
+        stored = repo.read_df("select * from benchmark_snapshots where fixture_id = 'fx_legacy'")
+    finally:
+        repo.close()
+
+    assert stored.height == 1
+    assert "unused_new_column" not in stored.columns
+    assert stored.row(0, named=True)["benchmark_price"] == 2.12
+
+
 def test_choose_later_snapshot_requires_real_later_snapshot():
     rows = pl.DataFrame(
         {
