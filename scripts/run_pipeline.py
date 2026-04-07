@@ -21,7 +21,6 @@ from footballmodel.live.monitoring import (
     detect_drift_alerts,
 )
 from footballmodel.orchestration.pipeline import (
-    build_pre_kickoff_benchmark_snapshots,
     build_prediction_time_benchmark_snapshots,
     run_fixture_prediction,
 )
@@ -336,9 +335,6 @@ def main() -> None:
     )
     if snapshots:
         repo.upsert_benchmark_snapshots(pl.concat(snapshots))
-    if upcoming.height:
-        repo.upsert_benchmark_snapshots(build_pre_kickoff_benchmark_snapshots(upcoming))
-
     benchmark_snapshots = repo.read_table_or_empty("benchmark_snapshots")
     live_review = _ensure_schema(
         build_live_review_rows(prediction_history_df, benchmark_snapshots, matches),

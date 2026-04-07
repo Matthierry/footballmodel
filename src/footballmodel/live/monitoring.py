@@ -44,7 +44,25 @@ def _actual_target(fixture: dict[str, object], market: str, outcome: str) -> tup
     return None, False
 
 
-def build_live_review_rows(
+def _settlement_snapshot_for_prediction(
+    benchmark_snapshots: pl.DataFrame,
+    fixture_id: str,
+    market: str,
+    outcome: str,
+    line: float | None,
+) -> dict[str, object] | None:
+    if benchmark_snapshots.is_empty():
+        return None
+    matching = benchmark_snapshots.with_columns(pl.col("line").cast(pl.Float64)).filter(
+        (pl.col("fixture_id") == fixture_id)
+        & (pl.col("market") == market)
+        & (pl.col("outcome") == outcome)
+        & (pl.col("line").is_null() if line is None else pl.col("line") == float(line))
+    )
+    return choose_later_snapshot(matching)
+
+
+def build_snapshot_review_rows(
     market_predictions: pl.DataFrame,
     benchmark_snapshots: pl.DataFrame,
     matches: pl.DataFrame,
@@ -53,7 +71,6 @@ def build_live_review_rows(
         return pl.DataFrame([])
 
     fixture_lookup = {str(row["fixture_id"]): row for row in matches.iter_rows(named=True)}
-    snapshot_keys = ["fixture_id", "market", "outcome", "line", "benchmark_price", "benchmark_source", "snapshot_type", "snapshot_timestamp_utc"]
     rows: list[dict[str, object]] = []
 
     for prediction in market_predictions.iter_rows(named=True):
@@ -64,33 +81,16 @@ def build_live_review_rows(
         if line is None:
             line = _line_for_market_outcome(market, outcome)
 
-        pred_snapshot = pl.DataFrame(
-            [
-                {
-                    "fixture_id": fixture_id,
-                    "market": market,
-                    "outcome": outcome,
-                    "line": line,
-                    "benchmark_price": prediction.get("current_price"),
-                    "benchmark_source": prediction.get("benchmark_source"),
-                    "snapshot_type": SNAPSHOT_TYPE_PREDICTION_TIME,
-                    "snapshot_timestamp_utc": prediction.get("prediction_timestamp_utc"),
-                }
-            ]
-        ).with_columns(pl.col("line").cast(pl.Float64))
-
-        matching_snapshots = benchmark_snapshots.with_columns(pl.col("line").cast(pl.Float64)).filter(
-            (pl.col("fixture_id") == fixture_id)
-            & (pl.col("market") == market)
-            & (pl.col("outcome") == outcome)
-            & (pl.col("line").is_null() if line is None else pl.col("line") == float(line))
+        settlement_snapshot = _settlement_snapshot_for_prediction(
+            benchmark_snapshots=benchmark_snapshots,
+            fixture_id=fixture_id,
+            market=market,
+            outcome=outcome,
+            line=line,
         )
 
-        combined = pl.concat([pred_snapshot.select(snapshot_keys), matching_snapshots.select(snapshot_keys)], how="vertical")
-        later = choose_later_snapshot(combined)
-
         current_price = prediction.get("current_price")
-        close_price = later.get("benchmark_price") if later else None
+        close_price = settlement_snapshot.get("benchmark_price") if settlement_snapshot else None
         clv = (1 / float(current_price) - 1 / float(close_price)) if (current_price is not None and close_price is not None) else None
         fixture = fixture_lookup.get(fixture_id, {})
         target, is_push = _actual_target(fixture, market, outcome)
@@ -119,9 +119,9 @@ def build_live_review_rows(
                 "prediction_snapshot_type": SNAPSHOT_TYPE_PREDICTION_TIME,
                 "prediction_snapshot_timestamp_utc": prediction.get("prediction_timestamp_utc"),
                 "later_benchmark_price": close_price,
-                "later_snapshot_type": later.get("snapshot_type") if later else None,
-                "later_snapshot_source": later.get("benchmark_source") if later else None,
-                "later_snapshot_timestamp_utc": later.get("snapshot_timestamp_utc") if later else None,
+                "later_snapshot_type": settlement_snapshot.get("snapshot_type") if settlement_snapshot else None,
+                "later_snapshot_source": settlement_snapshot.get("benchmark_source") if settlement_snapshot else None,
+                "later_snapshot_timestamp_utc": settlement_snapshot.get("snapshot_timestamp_utc") if settlement_snapshot else None,
                 "clv": clv,
                 "settlement_status": "settled" if settled else "pending",
                 "result_status": "push" if is_push else ("won" if target == 1 else "lost" if target == 0 else "pending"),
@@ -131,6 +131,14 @@ def build_live_review_rows(
         )
 
     return pl.DataFrame(rows)
+
+
+def build_live_review_rows(
+    market_predictions: pl.DataFrame,
+    benchmark_snapshots: pl.DataFrame,
+    matches: pl.DataFrame,
+) -> pl.DataFrame:
+    return build_snapshot_review_rows(market_predictions, benchmark_snapshots, matches)
 
 
 def build_live_run_summary(
@@ -546,6 +554,6 @@ def build_email_alert_events(alerts: pl.DataFrame, enabled: bool) -> pl.DataFram
             pl.col("config_name"),
             pl.col("config_version"),
             pl.lit("queued").alias("notification_status"),
-            pl.lit("live_monitoring").alias("channel"),
+            pl.lit("snapshot_review").alias("channel"),
         ]
     )

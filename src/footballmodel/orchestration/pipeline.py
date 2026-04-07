@@ -10,7 +10,6 @@ from footballmodel.ingestion.clubelo import elo_as_of
 from footballmodel.markets.benchmark import resolve_benchmark_price
 from footballmodel.markets.benchmark_snapshots import (
     SNAPSHOT_TYPE_PREDICTION_TIME,
-    SNAPSHOT_TYPE_PRE_KICKOFF_LATEST,
     benchmark_snapshot_rows_from_fixture,
 )
 from footballmodel.markets.derivation import derive_ah, derive_correct_score_top5, matrix_to_market_table
@@ -152,17 +151,3 @@ def build_prediction_time_benchmark_snapshots(fixture: dict, prediction_timestam
         snapshot_type=SNAPSHOT_TYPE_PREDICTION_TIME,
         snapshot_timestamp_utc=prediction_timestamp_utc,
     )
-
-
-def build_pre_kickoff_benchmark_snapshots(fixtures: pl.DataFrame, snapshot_timestamp_utc: str | None = None) -> pl.DataFrame:
-    rows = [
-        benchmark_snapshot_rows_from_fixture(
-            fixture=fixture,
-            snapshot_type=SNAPSHOT_TYPE_PRE_KICKOFF_LATEST,
-            snapshot_timestamp_utc=snapshot_timestamp_utc,
-        )
-        for fixture in fixtures.iter_rows(named=True)
-    ]
-    if not rows:
-        return pl.DataFrame([])
-    return pl.concat(rows)
