@@ -10,6 +10,7 @@ from footballmodel.ingestion.clubelo import elo_as_of, load_clubelo_csv
 from footballmodel.ingestion.clubelo import build_clubelo_raw_file, load_clubelo_config
 from footballmodel.ingestion.football_data import (
     FOOTBALL_DATA_MAPPING,
+    _fetch_source_csv,
     _normalize_football_data_df,
     _parse_upcoming_fixtures_payload,
     build_football_data_raw_file,
@@ -334,10 +335,33 @@ def test_parse_upcoming_fixtures_payload_sanitizes_bom_prefixed_div_header():
     assert diagnostics.league_code_populated_rows == 1
 
 
+def test_parse_upcoming_fixtures_payload_sanitizes_mojibake_bom_prefixed_div_header():
+    fixture_day = (date.today() + timedelta(days=2)).strftime("%d/%m/%Y")
+    payload = f"ï»¿Div,Date,HomeTeam,AwayTeam,B365H,B365D,B365A\nE0,{fixture_day},Wigan,Reading,2.4,3.3,2.9\n"
+    parsed, diagnostics = _parse_upcoming_fixtures_payload(
+        payload,
+        source_url="https://example.test/fixtures.csv",
+        fetched_at_utc="2026-04-01T00:00:00+00:00",
+        csv_to_league={"E0": "ENG1"},
+    )
+
+    row = parsed.row(0, named=True)
+    assert row["source_div"] == "E0"
+    assert row["league_code"] == "ENG1"
+    assert row["league"] == "ENG1"
+    assert diagnostics.bom_header_sanitized is True
+    assert diagnostics.sanitized_header_count == 1
+    assert diagnostics.raw_div_column_found is True
+    assert diagnostics.raw_div_populated_rows == 1
+    assert diagnostics.source_div_populated_rows == 1
+    assert diagnostics.league_code_populated_rows == 1
+
+
 @pytest.mark.parametrize(
     ("div_header", "sanitized_minimum"),
     [
         ("\ufeffDiv", 1),
+        ("ï»¿Div", 1),
         (" Div ", 1),
         ("div", 0),
         ("D i v", 0),
@@ -374,6 +398,22 @@ def test_parse_upcoming_fixtures_payload_handles_schema_change_gracefully():
             fetched_at_utc="2026-03-27T00:00:00+00:00",
             csv_to_league={"E0": "ENG1"},
         )
+
+
+def test_fetch_source_csv_decodes_utf8_sig_content(monkeypatch: pytest.MonkeyPatch):
+    class _Response:
+        content = b"\xef\xbb\xbfDiv,Date\nE0,2026-04-10\n"
+        text = "wrong-text"
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("footballmodel.ingestion.football_data.requests.get", lambda *_args, **_kwargs: _Response())
+
+    payload = _fetch_source_csv("https://example.test/fixtures.csv")
+
+    assert payload.startswith("Div,Date")
+    assert not payload.startswith("\ufeff")
 
 
 def test_build_football_data_raw_file_fails_when_all_sources_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

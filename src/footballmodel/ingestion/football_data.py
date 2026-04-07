@@ -256,7 +256,7 @@ def _normalize_football_data_df(
 def _sanitize_csv_headers(df: pl.DataFrame) -> tuple[pl.DataFrame, bool, int]:
     rename_map: dict[str, str] = {}
     for column in df.columns:
-        sanitized = str(column).lstrip("\ufeff").strip()
+        sanitized = str(column).lstrip("\ufeff").removeprefix("ï»¿").strip()
         if sanitized != column:
             rename_map[column] = sanitized
     if not rename_map:
@@ -268,6 +268,7 @@ def _normalize_header_for_matching(column: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(column))
     normalized = (
         normalized.replace("\ufeff", "")
+        .removeprefix("ï»¿")
         .replace("\u00a0", " ")
         .replace("\u200b", "")
         .replace("\u200c", "")
@@ -386,7 +387,10 @@ def load_football_data_csv(path: str | Path, *, csv_to_league: dict[str, str] | 
 def _fetch_source_csv(url: str, timeout_seconds: int = 20) -> str:
     response = requests.get(url, timeout=timeout_seconds)
     response.raise_for_status()
-    return response.text
+    try:
+        return response.content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return response.text
 
 
 def _parse_upcoming_fixtures_payload(
@@ -397,7 +401,7 @@ def _parse_upcoming_fixtures_payload(
     csv_to_league: dict[str, str],
 ) -> tuple[pl.DataFrame, UpcomingFixturesParseDiagnostics]:
     first_line = payload.splitlines()[0] if payload else ""
-    payload_has_bom_header = "\ufeff" in first_line
+    payload_has_bom_header = "\ufeff" in first_line or first_line.startswith("ï»¿")
     try:
         raw_frame = pl.read_csv(BytesIO(payload.encode("utf-8")), ignore_errors=True)
         raw_columns_exact = [str(column) for column in raw_frame.columns]
