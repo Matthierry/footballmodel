@@ -10,7 +10,7 @@ MARKET = "Correct Score"
 
 require_password_gate()
 st.title(TITLE)
-st.caption("Focused market view powered by the same dataset as Today's Value Bets.")
+st.caption("Secondary market view (filtered from Today's Value Bets data).")
 
 repo = DuckRepository()
 data = load_core_data(repo)
@@ -27,7 +27,13 @@ else:
 
     scoped = apply_prediction_filters(review, market=MARKET, league=league, min_edge=float(min_edge), value_only=value_only)
     if scoped.is_empty():
-        st.info("No rows match filters for this market.")
+        total_market = apply_prediction_filters(review, market=MARKET, league=league, min_edge=0.0, value_only=False)
+        if total_market.is_empty():
+            st.info("No in-scope rows exist for this market today.")
+        elif value_only:
+            st.info("Assessed rows exist, but no value selections match your filters.")
+        else:
+            st.info("Filters excluded all rows for this market.")
     else:
         st.dataframe(prediction_display_table(scoped), use_container_width=True)
 

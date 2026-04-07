@@ -11,7 +11,7 @@ from footballmodel.ui_dashboard import load_core_data, require_password_gate, to
 
 require_password_gate()
 st.title("Run Pipeline")
-st.caption("Operational run control for the snapshot workflow (predict -> snapshot -> review).")
+st.caption("Predict → snapshot benchmarks → review value and settlement readiness.")
 
 cfg = load_app_config("config/runtime.yaml")
 active_name, active_cfg = cfg.resolve_live_config()
@@ -25,15 +25,17 @@ latest = runs.row(0, named=True) if runs.height else {}
 today = today_scope(review)
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Latest run status", "OK" if runs.height else "No runs")
-m2.metric("Last successful run", str(latest.get("run_timestamp_utc", "N/A")))
-m3.metric("Today's fixtures", today.select("fixture_id").n_unique() if today.height and "fixture_id" in today.columns else 0)
-m4.metric("Today's value selections", today.filter(today["value_flag"] == True).height if today.height and "value_flag" in today.columns else 0)
+m1.metric("Run status", "Ready" if runs.height else "No runs")
+m2.metric("Latest run", str(latest.get("run_timestamp_utc", "N/A")))
+m3.metric("In-scope fixtures", today.select("fixture_id").n_unique() if today.height and "fixture_id" in today.columns else 0)
+m4.metric("Value selections", today.filter(pl.col("status") == "Value").height if today.height and "status" in today.columns else 0)
 
-st.caption(f"Latest run id/config: {latest.get('live_run_id', 'N/A')} | {latest.get('config_name', active_name)} {latest.get('config_version', active_cfg.version)}")
+st.caption(f"Active config: {latest.get('config_name', active_name)} {latest.get('config_version', active_cfg.version)}")
 
-if st.button("Manual run control (coming soon)"):
-    st.info("Manual trigger is not wired in this UI yet. Use scripts/run_pipeline.py until button execution is enabled.")
+st.markdown("**What a run does**")
+st.caption("1) score fixtures, 2) capture benchmark snapshots, 3) write review rows for decision and later settlement.")
+st.button("Manual run (disabled – use scripts/run_pipeline.py)", disabled=True)
+st.caption("Manual trigger is intentionally disabled in UI until safe execution controls are wired.")
 
 if not runs.is_empty():
     st.subheader("Recent run log")
@@ -41,11 +43,18 @@ if not runs.is_empty():
     st.dataframe(runs.select(cols).head(25), use_container_width=True)
 
 if today.is_empty():
-    st.info("No fixtures were eligible today. Check upstream ingestion and benchmark snapshot availability.")
+    st.info("No in-scope fixtures today. Check ingestion coverage and benchmark snapshot availability.")
+else:
+    value_today = today.filter(pl.col("status") == "Value").height
+    if value_today == 0:
+        st.info("No value selections today. Rows may be assessed but below threshold or missing benchmark.")
 
-if not review.is_empty() and "run_timestamp_utc" in review.columns and "value_flag" in review.columns:
-    stale = review.filter((pl.col("match_date") == date.today()) & pl.col("value_flag").is_null()) if "match_date" in review.columns else review.head(0)
+if int(latest.get("market_predictions", 0) or 0) == 0:
+    st.warning("Latest run produced zero predictions.")
+
+if not review.is_empty() and "run_timestamp_utc" in review.columns and "status" in review.columns:
+    stale = review.filter((pl.col("match_date") == date.today()) & (pl.col("status") == "Unavailable")) if "match_date" in review.columns else review.head(0)
     if stale.height:
-        st.warning("Some rows are assessed without value classification. Verify benchmark capture and threshold settings.")
+        st.warning("Some rows are unavailable due to missing edge inputs. Verify benchmark capture and model fair prices.")
 
 repo.close()

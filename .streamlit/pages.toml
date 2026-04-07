@@ -1,0 +1,54 @@
+[[pages]]
+path = "app.py"
+name = "Dashboard"
+icon = "🏠"
+
+[[pages]]
+path = "pages/Todays_Value_Bets.py"
+name = "Today's Value Bets"
+icon = "🎯"
+
+[[pages]]
+path = "pages/Fixture_Drilldown.py"
+name = "Fixture Detail"
+icon = "🔎"
+
+[[pages]]
+path = "pages/Run_Control.py"
+name = "Run Pipeline"
+icon = "⚙️"
+
+[[pages]]
+path = "pages/History.py"
+name = "History"
+icon = "🕒"
+
+[[pages]]
+path = "pages/Backtest_Lab.py"
+name = "Backtest Lab"
+icon = "🧪"
+
+[[pages]]
+path = "pages/Experiments.py"
+name = "Experiments"
+icon = "📈"
+
+[[pages]]
+path = "pages/1X2.py"
+name = "Market View · 1X2"
+
+[[pages]]
+path = "pages/Over_Under_2_5.py"
+name = "Market View · Over/Under 2.5"
+
+[[pages]]
+path = "pages/BTTS.py"
+name = "Market View · BTTS"
+
+[[pages]]
+path = "pages/Asian_Handicap.py"
+name = "Market View · Asian Handicap"
+
+[[pages]]
+path = "pages/Correct_Score.py"
+name = "Market View · Correct Score"
