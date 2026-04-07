@@ -74,6 +74,21 @@ else:
         latest_ts = scoped.select(pl.col("run_timestamp_utc").max().alias("run_timestamp_utc")).row(0, named=True).get("run_timestamp_utc")
         scoped = scoped.filter(pl.col("run_timestamp_utc") == latest_ts)
 
+    optional_schema: list[tuple[str, pl.DataType, object]] = [
+        ("market", pl.Utf8, "Unavailable"),
+        ("outcome", pl.Utf8, "Unavailable"),
+        ("raw_probability", pl.Float64, None),
+        ("calibrated_probability", pl.Float64, None),
+        ("model_fair_odds", pl.Float64, None),
+        ("current_price", pl.Float64, None),
+        ("edge", pl.Float64, None),
+        ("value_flag", pl.Boolean, False),
+        ("line", pl.Float64, None),
+    ]
+    for col, dtype, default in optional_schema:
+        if col not in scoped.columns:
+            scoped = scoped.with_columns(pl.lit(default).cast(dtype, strict=False).alias(col))
+
     scoped = scoped.with_columns(
         pl.col("raw_probability").cast(pl.Float64, strict=False),
         pl.col("calibrated_probability").cast(pl.Float64, strict=False),
@@ -86,6 +101,11 @@ else:
 
     probability_col = "calibrated_probability" if "calibrated_probability" in scoped.columns else "raw_probability"
     scoped = scoped.with_columns(pl.col(probability_col).cast(pl.Float64, strict=False).alias("model_probability"))
+    has_market_level_detail = (
+        ("market" in base.columns)
+        and ("outcome" in base.columns)
+        and ("raw_probability" in base.columns or "calibrated_probability" in base.columns)
+    )
 
     latest_run = runs.row(0, named=True) if runs.height else {}
 
@@ -124,66 +144,75 @@ else:
         st.caption("Standout rationale: this market has the strongest model-vs-market gap on currently available benchmark prices.")
 
     st.subheader("Probability distributions")
+    if not has_market_level_detail:
+        render_empty_state(
+            "Detailed market probability data is unavailable in this dataset view. "
+            "Fixture-level context is shown, but model-vs-market distributions require market-level prediction rows."
+        )
 
-    def _market_block(market: str, title: str) -> None:
-        block = scoped.filter(pl.col("market") == market)
-        if block.is_empty():
-            render_empty_state(f"{title} unavailable for this fixture.")
-            return
-        chart_df = block.select([
-            pl.col("outcome").cast(pl.Utf8),
-            pl.col("model_probability"),
-            pl.col("market_implied_probability").alias("market_probability"),
-        ])
-        render_dark_bar_comparison(chart_df, title=title)
-        table = block.select([
+    if has_market_level_detail:
+        def _market_block(market: str, title: str) -> None:
+            block = scoped.filter(pl.col("market") == market)
+            if block.is_empty():
+                render_empty_state(f"{title} unavailable for this fixture.")
+                return
+            chart_df = block.select([
+                pl.col("outcome").cast(pl.Utf8),
+                pl.col("model_probability"),
+                pl.col("market_implied_probability").alias("market_probability"),
+            ])
+            render_dark_bar_comparison(chart_df, title=title)
+            table = block.select([
+                pl.col("outcome"),
+                pl.col("model_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%").alias("model_probability"),
+                pl.when(pl.col("market_implied_probability").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("market_implied_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("market_implied_probability"),
+                pl.when(pl.col("model_fair_odds").is_null()).then(pl.lit("N/A")).otherwise(pl.col("model_fair_odds").round(3).cast(pl.Utf8)).alias("model_fair_odds"),
+                pl.when(pl.col("current_price").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("current_price").round(3).cast(pl.Utf8)).alias("market_odds"),
+                pl.when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).otherwise(pl.col("edge").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("edge"),
+                pl.when(pl.col("value_flag") & pl.col("edge").is_not_null()).then(pl.lit("Value")).otherwise(pl.lit("Assessed")).alias("value_status"),
+            ])
+            dark_dataframe(table)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            _market_block("1X2", "1X2 model vs market")
+            _market_block("Over/Under 2.5", "Over/Under 2.5 model vs market")
+        with c2:
+            _market_block("BTTS", "BTTS model vs market")
+            st.markdown("**Asian Handicap**")
+            ah = scoped.filter(pl.col("market") == "Asian Handicap")
+            if ah.is_empty():
+                render_empty_state("Asian Handicap unavailable for this fixture.")
+            else:
+                ah_table = ah.select([
+                    pl.col("line"),
+                    pl.col("outcome"),
+                    pl.col("model_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%").alias("model_probability"),
+                    pl.when(pl.col("market_implied_probability").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("market_implied_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("market_implied_probability"),
+                    pl.when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).otherwise(pl.col("edge").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("edge"),
+                    pl.when(pl.col("value_flag") & pl.col("edge").is_not_null()).then(pl.lit("Value")).otherwise(pl.lit("Assessed")).alias("value_status"),
+                ]).sort(["line", "edge"], descending=[False, True], nulls_last=True)
+                dark_dataframe(ah_table)
+
+        st.subheader("Model vs market detail")
+        detail = scoped.select([
+            pl.col("market"),
+            pl.col("line"),
             pl.col("outcome"),
             pl.col("model_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%").alias("model_probability"),
             pl.when(pl.col("market_implied_probability").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("market_implied_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("market_implied_probability"),
             pl.when(pl.col("model_fair_odds").is_null()).then(pl.lit("N/A")).otherwise(pl.col("model_fair_odds").round(3).cast(pl.Utf8)).alias("model_fair_odds"),
             pl.when(pl.col("current_price").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("current_price").round(3).cast(pl.Utf8)).alias("market_odds"),
             pl.when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).otherwise(pl.col("edge").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("edge"),
-            pl.when(pl.col("value_flag") & pl.col("edge").is_not_null()).then(pl.lit("Value")).otherwise(pl.lit("Assessed")).alias("value_status"),
-        ])
-        dark_dataframe(table)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        _market_block("1X2", "1X2 model vs market")
-        _market_block("Over/Under 2.5", "Over/Under 2.5 model vs market")
-    with c2:
-        _market_block("BTTS", "BTTS model vs market")
-        st.markdown("**Asian Handicap**")
-        ah = scoped.filter(pl.col("market") == "Asian Handicap")
-        if ah.is_empty():
-            render_empty_state("Asian Handicap unavailable for this fixture.")
-        else:
-            ah_table = ah.select([
-                pl.col("line"),
-                pl.col("outcome"),
-                pl.col("model_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%").alias("model_probability"),
-                pl.when(pl.col("market_implied_probability").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("market_implied_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("market_implied_probability"),
-                pl.when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).otherwise(pl.col("edge").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("edge"),
-                pl.when(pl.col("value_flag") & pl.col("edge").is_not_null()).then(pl.lit("Value")).otherwise(pl.lit("Assessed")).alias("value_status"),
-            ]).sort(["line", "edge"], descending=[False, True], nulls_last=True)
-            dark_dataframe(ah_table)
-
-    st.subheader("Model vs market detail")
-    detail = scoped.select([
-        pl.col("market"),
-        pl.col("line"),
-        pl.col("outcome"),
-        pl.col("model_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%").alias("model_probability"),
-        pl.when(pl.col("market_implied_probability").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("market_implied_probability").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("market_implied_probability"),
-        pl.when(pl.col("model_fair_odds").is_null()).then(pl.lit("N/A")).otherwise(pl.col("model_fair_odds").round(3).cast(pl.Utf8)).alias("model_fair_odds"),
-        pl.when(pl.col("current_price").is_null()).then(pl.lit("Missing benchmark")).otherwise(pl.col("current_price").round(3).cast(pl.Utf8)).alias("market_odds"),
-        pl.when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).otherwise(pl.col("edge").mul(100).round(2).cast(pl.Utf8) + pl.lit("%")).alias("edge"),
-        pl.when(pl.col("current_price").is_null()).then(pl.lit("Missing benchmark")).when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).when(pl.col("value_flag")).then(pl.lit("Value")).otherwise(pl.lit("Assessed")).alias("status"),
-    ]).sort(["market", "edge"], descending=[False, True], nulls_last=True)
-    dark_dataframe(detail)
+            pl.when(pl.col("current_price").is_null()).then(pl.lit("Missing benchmark")).when(pl.col("edge").is_null()).then(pl.lit("Unavailable")).when(pl.col("value_flag")).then(pl.lit("Value")).otherwise(pl.lit("Assessed")).alias("status"),
+        ]).sort(["market", "edge"], descending=[False, True], nulls_last=True)
+        dark_dataframe(detail)
+    else:
+        st.subheader("Model vs market detail")
+        render_empty_state("Model-vs-market table unavailable without market-level prediction rows.")
 
     st.subheader("Correct score probability grid")
-    cs = scoped.filter(pl.col("market") == "Correct Score")
+    cs = scoped.filter(pl.col("market") == "Correct Score") if has_market_level_detail else scoped.head(0)
     if cs.is_empty():
         render_empty_state("Correct Score probabilities are unavailable for this fixture.")
     else:
