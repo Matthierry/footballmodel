@@ -3,11 +3,12 @@ from __future__ import annotations
 import streamlit as st
 
 from footballmodel.storage.repository import DuckRepository
-from footballmodel.ui_dashboard import apply_prediction_filters, load_core_data, prediction_display_table, require_password_gate, today_scope
+from footballmodel.ui_dashboard import apply_premium_dark_theme, render_empty_state, apply_prediction_filters, load_core_data, prediction_display_table, require_password_gate, today_scope
 
 TITLE = "1X2"
 MARKET = "1X2"
 
+apply_premium_dark_theme("1X2")
 require_password_gate()
 st.title(TITLE)
 st.caption("Secondary market view (filtered from Today's Value Bets data).")
@@ -17,7 +18,7 @@ data = load_core_data(repo)
 review = today_scope(data["review"])
 
 if review.is_empty():
-    st.info("No assessed selections for today.")
+    render_empty_state("No assessed selections for today.")
 else:
     leagues = ["All"] + sorted(review["league"].drop_nulls().unique().to_list()) if "league" in review.columns else ["All"]
     c1, c2, c3 = st.columns(3)

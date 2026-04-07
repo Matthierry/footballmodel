@@ -7,8 +7,9 @@ import streamlit as st
 
 from footballmodel.config.settings import load_app_config
 from footballmodel.storage.repository import DuckRepository
-from footballmodel.ui_dashboard import load_core_data, require_password_gate, today_scope
+from footballmodel.ui_dashboard import apply_premium_dark_theme, render_empty_state, load_core_data, require_password_gate, today_scope
 
+apply_premium_dark_theme("Run Control")
 require_password_gate()
 st.title("Run Pipeline")
 st.caption("Predict → snapshot benchmarks → review value and settlement readiness.")

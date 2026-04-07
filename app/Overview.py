@@ -6,13 +6,23 @@ import polars as pl
 import streamlit as st
 
 from footballmodel.storage.repository import DuckRepository
-from footballmodel.ui_dashboard import MARKET_ORDER, load_core_data, market_breakdown, prediction_display_table, require_password_gate, today_scope
+from footballmodel.ui_dashboard import (
+    MARKET_ORDER,
+    apply_premium_dark_theme,
+    load_core_data,
+    market_breakdown,
+    prediction_display_table,
+    render_empty_state,
+    render_metric_card,
+    require_password_gate,
+    today_scope,
+)
 
-st.set_page_config(page_title="Dashboard", layout="wide")
+apply_premium_dark_theme("Dashboard", "🏁")
 require_password_gate()
 
 st.title("Dashboard")
-st.caption("Daily workflow: inspect one fixture, review today's value bets, run pipeline checks, and audit history.")
+st.caption("Command center for fixture deep-dives, value shortlist triage, pipeline checks, and performance review.")
 
 repo: DuckRepository | None = None
 try:
@@ -25,49 +35,81 @@ try:
     latest_run = runs.row(0, named=True) if runs.height else {}
     today = today_scope(review)
     today_fixtures = today.select("fixture_id").n_unique() if "fixture_id" in today.columns and today.height else 0
-    upcoming_fixtures = matches.filter(pl.col("match_date") >= pl.lit(date.today())).height if (not matches.is_empty() and "match_date" in matches.columns) else 0
+    assessed_count = today.height
     value_count = today.filter(pl.col("status") == "Value").height if today.height else 0
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Run status", "Ready" if runs.height else "No runs yet")
-    k2.metric("Latest run", str(latest_run.get("run_timestamp_utc", "N/A")))
-    k3.metric("In-scope fixtures today", today_fixtures)
-    k4.metric("Value selections today", value_count)
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Assessed selections today", today.height)
-    m2.metric("Upcoming fixtures available", upcoming_fixtures)
     predictions_count = int(latest_run.get("market_predictions", 0) or 0)
-    m3.metric("Predictions in latest run", predictions_count)
+    st.metric("Predictions in latest run", predictions_count)
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        render_metric_card("Latest run status", "READY" if runs.height else "NO RUNS", tone="info", delta=str(latest_run.get("run_timestamp_utc", "N/A")))
+    with k2:
+        render_metric_card("In-scope fixtures today", today_fixtures, tone="info")
+    with k3:
+        render_metric_card("Assessed selections", assessed_count, tone="info")
+    with k4:
+        render_metric_card("Value opportunities", value_count, tone="value" if value_count else "warn")
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Value opportunities by market")
+        breakdown = market_breakdown(today)
+        if breakdown.is_empty():
+            render_empty_state("No eligible fixtures are in scope today yet.")
+        else:
+            ordered = breakdown.with_columns(
+                pl.col("market").replace_strict({m: i for i, m in enumerate(MARKET_ORDER)}, default=999).alias("order")
+            ).sort("order")
+            if hasattr(st, "bar_chart"):
+                st.bar_chart(ordered.to_pandas().set_index("market")[["value", "assessed"]])
+            else:
+                st.dataframe(ordered.select(["market", "value", "assessed"]))
+
+    with right:
+        st.subheader("Top opportunities today")
+        top = today.filter(pl.col("status") == "Value") if today.height else today.head(0)
+        if top.is_empty():
+            render_empty_state("No value selections flagged currently. Monitor run health and benchmark coverage.")
+        else:
+            st.dataframe(
+                prediction_display_table(top.sort("edge", descending=True, nulls_last=True)).head(8),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    b1, b2 = st.columns(2)
+    with b1:
+        st.subheader("Recent run trend")
+        if runs.is_empty() or "run_timestamp_utc" not in runs.columns:
+            render_empty_state("No run history available yet.")
+        else:
+            run_trend = runs.select([c for c in ["run_timestamp_utc", "fixtures_scored", "market_predictions", "review_rows"] if c in runs.columns]).head(12)
+            if run_trend.is_empty() or run_trend.width < 2:
+                render_empty_state("Insufficient run data for trend chart.")
+            else:
+                trend_pdf = run_trend.reverse().to_pandas().set_index("run_timestamp_utc")
+                if hasattr(st, "line_chart"):
+                    st.line_chart(trend_pdf)
+                else:
+                    st.dataframe(run_trend)
+
+    with b2:
+        st.subheader("Quick actions")
+        if hasattr(st, "page_link"):
+            q1, q2 = st.columns(2)
+            q1.page_link("pages/Fixture_Drilldown.py", label="🔎 Inspect Fixture", icon="🎯")
+            q2.page_link("pages/Todays_Value_Bets.py", label="💡 Today Value List", icon="📈")
+            q3, q4 = st.columns(2)
+            q3.page_link("pages/Run_Control.py", label="⚙️ Run Pipeline", icon="🛠️")
+            q4.page_link("pages/History.py", label="🧾 Review History", icon="📚")
+        else:
+            st.markdown("- Fixture Detail\n- Today's Value Bets\n- Run Pipeline\n- History")
+        upcoming_fixtures = matches.filter(pl.col("match_date") >= pl.lit(date.today())).height if (not matches.is_empty() and "match_date" in matches.columns) else 0
+        st.metric("Upcoming fixtures available", upcoming_fixtures)
 
     if predictions_count == 0:
         st.info("Latest run produced zero market predictions.")
-
-    st.subheader("Value opportunities by market")
-    breakdown = market_breakdown(today)
-    if breakdown.is_empty():
-        st.info("No eligible fixtures are in scope today.")
-    else:
-        show = {row["market"]: row for row in breakdown.to_dicts()}
-        cols = st.columns(len(MARKET_ORDER))
-        for idx, market in enumerate(MARKET_ORDER):
-            row = show.get(market, {})
-            cols[idx].metric(market, f"{int(row.get('value', 0))} value / {int(row.get('assessed', 0))} assessed")
-
-    st.subheader("Top value opportunities today")
-    top = today.filter(pl.col("status") == "Value") if today.height else today.head(0)
-    if top.is_empty():
-        st.info("No value selections are currently flagged for today's fixture set.")
-    else:
-        st.dataframe(prediction_display_table(top.sort("edge", descending=True)).head(20), use_container_width=True)
-
-    st.subheader("Quick actions")
-    st.markdown(
-        "- **Today's Value Bets**: action shortlist\n"
-        "- **Fixture Detail**: deep-dive one match\n"
-        "- **Run Pipeline**: run status + manual trigger state\n"
-        "- **History**: review and settlement checks"
-    )
 
     if matches.is_empty():
         st.info("No curated fixture dataset found yet. Run pipeline ingestion before relying on dashboard metrics.")

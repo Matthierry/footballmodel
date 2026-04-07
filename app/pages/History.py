@@ -4,8 +4,9 @@ import polars as pl
 import streamlit as st
 
 from footballmodel.storage.repository import DuckRepository
-from footballmodel.ui_dashboard import load_core_data, require_password_gate
+from footballmodel.ui_dashboard import apply_premium_dark_theme, render_empty_state, load_core_data, require_password_gate
 
+apply_premium_dark_theme("History")
 require_password_gate()
 st.title("History")
 st.caption("Review previous selections for settlement, CLV, and model quality checks.")

@@ -4,8 +4,9 @@ import polars as pl
 import streamlit as st
 
 from footballmodel.storage.repository import DuckRepository
-from footballmodel.ui_dashboard import apply_prediction_filters, load_core_data, prediction_detail_table, prediction_display_table, require_password_gate, today_scope
+from footballmodel.ui_dashboard import apply_premium_dark_theme, render_empty_state, apply_prediction_filters, load_core_data, prediction_detail_table, prediction_display_table, require_password_gate, today_scope
 
+apply_premium_dark_theme("Todays Value Bets")
 require_password_gate()
 st.title("Today's Value Bets")
 st.caption("Decision shortlist for today's fixtures.")
@@ -15,7 +16,7 @@ data = load_core_data(repo)
 review = today_scope(data["review"])
 
 if review.is_empty():
-    st.info("No assessed selections for today yet. Run the pipeline or widen fixture date coverage.")
+    render_empty_state("No assessed selections for today yet. Run the pipeline or widen fixture date coverage.")
 else:
     markets = ["All"] + sorted(review["market"].drop_nulls().unique().to_list()) if "market" in review.columns else ["All"]
     leagues = ["All"] + sorted(review["league"].drop_nulls().unique().to_list()) if "league" in review.columns else ["All"]
