@@ -90,7 +90,9 @@ class UpcomingFixturesParseDiagnostics:
     future_rows: int
     future_rows_with_published_odds: int
     raw_div_column_found: bool
+    raw_div_populated_rows: int
     source_div_populated_rows: int
+    league_populated_rows: int
     league_code_populated_rows: int
     mapped_league_code_rows: int
     future_rows_with_league_code: int
@@ -270,6 +272,17 @@ def _map_div_to_league_code_expr(column: str, *, csv_to_league: dict[str, str]) 
     )
 
 
+def _populated_count(df: pl.DataFrame, column: str) -> int:
+    if column not in df.columns:
+        return 0
+    return (
+        df.filter(
+            pl.col(column).cast(pl.Utf8, strict=False).is_not_null()
+            & (pl.col(column).cast(pl.Utf8, strict=False).str.strip_chars() != "")
+        ).height
+    )
+
+
 def _ensure_canonical_league_fields(
     df: pl.DataFrame,
     *,
@@ -311,8 +324,21 @@ def _normalize_upcoming_fixtures_df(
         source_url=source_url,
         fetched_at_utc=fetched_at_utc,
     )
+    if "Div" in raw_df.columns:
+        raw_div = raw_df.select(
+            pl.col("Div")
+            .cast(pl.Utf8, strict=False)
+            .str.strip_chars()
+            .replace("", None)
+            .alias("_raw_div")
+        ).get_column("_raw_div")
+        normalized = normalized.with_columns(raw_div).with_columns(
+            pl.coalesce(pl.col("source_div").cast(pl.Utf8, strict=False), pl.col("_raw_div").cast(pl.Utf8, strict=False)).alias("source_div")
+        )
     normalized = normalized.with_columns(pl.lit(None, dtype=pl.Utf8).alias("league_code"))
     normalized = _ensure_canonical_league_fields(normalized, csv_to_league=csv_to_league, prefer_source_div=True)
+    if "_raw_div" in normalized.columns:
+        normalized = normalized.drop("_raw_div")
     normalized = normalized.with_columns(
         pl.lit(None, dtype=pl.Utf8).alias("season_code"),
         pl.lit(False).alias("is_played"),
@@ -373,7 +399,9 @@ def _parse_upcoming_fixtures_payload(
             future_rows=0,
             future_rows_with_published_odds=0,
             raw_div_column_found=False,
+            raw_div_populated_rows=0,
             source_div_populated_rows=0,
+            league_populated_rows=0,
             league_code_populated_rows=0,
             mapped_league_code_rows=0,
             future_rows_with_league_code=0,
@@ -415,10 +443,34 @@ def _parse_upcoming_fixtures_payload(
         source_url=source_url,
         fetched_at_utc=fetched_at_utc,
     )
+    print(
+        "Upcoming fixtures stage=raw:"
+        f" rows={scoped.height}"
+        f" raw_div_populated_rows={_populated_count(scoped, 'Div')}"
+        f" source_div_populated_rows={_populated_count(scoped, 'source_div')}"
+        f" league_populated_rows={_populated_count(scoped, 'league')}"
+        f" league_code_populated_rows={_populated_count(scoped, 'league_code')}"
+    )
+    print(
+        "Upcoming fixtures stage=normalized:"
+        f" rows={merged.height}"
+        f" raw_div_populated_rows={_populated_count(merged, 'source_div')}"
+        f" source_div_populated_rows={_populated_count(merged, 'source_div')}"
+        f" league_populated_rows={_populated_count(merged, 'league')}"
+        f" league_code_populated_rows={_populated_count(merged, 'league_code')}"
+    )
     cleaned = (
         merged.filter(pl.col("match_date").is_not_null())
         .filter(pl.col("home_team").is_not_null() & pl.col("away_team").is_not_null())
         .with_columns(_build_fixture_id_expr())
+    )
+    print(
+        "Upcoming fixtures stage=cleaned:"
+        f" rows={cleaned.height}"
+        f" raw_div_populated_rows={_populated_count(cleaned, 'source_div')}"
+        f" source_div_populated_rows={_populated_count(cleaned, 'source_div')}"
+        f" league_populated_rows={_populated_count(cleaned, 'league')}"
+        f" league_code_populated_rows={_populated_count(cleaned, 'league_code')}"
     )
     today = datetime.now(timezone.utc).date()
     odds_cols = [c for c in ["avg_home_odds", "avg_draw_odds", "avg_away_odds", "bf_home_odds", "bf_draw_odds", "bf_away_odds"] if c in cleaned.columns]
@@ -430,8 +482,10 @@ def _parse_upcoming_fixtures_payload(
         if "league_code" in cleaned.columns
         else 0
     )
-    source_div_rows = cleaned.filter(pl.col("source_div").is_not_null()).height if "source_div" in cleaned.columns else 0
-    league_code_rows = cleaned.filter(pl.col("league_code").is_not_null()).height if "league_code" in cleaned.columns else 0
+    raw_div_rows = _populated_count(scoped, "Div")
+    source_div_rows = _populated_count(cleaned, "source_div")
+    league_rows = _populated_count(cleaned, "league")
+    league_code_rows = _populated_count(cleaned, "league_code")
     mapped_league_rows = (
         cleaned.filter(
             pl.col("source_div").is_not_null()
@@ -452,7 +506,9 @@ def _parse_upcoming_fixtures_payload(
         future_rows=future_rows,
         future_rows_with_published_odds=future_rows_with_published_odds,
         raw_div_column_found="Div" in scoped.columns,
+        raw_div_populated_rows=raw_div_rows,
         source_div_populated_rows=source_div_rows,
+        league_populated_rows=league_rows,
         league_code_populated_rows=league_code_rows,
         mapped_league_code_rows=mapped_league_rows,
         future_rows_with_league_code=future_rows_with_league_code,
@@ -489,7 +545,9 @@ def build_football_data_raw_file(
     future_fixtures_with_published_odds = 0
     upcoming_rows_after_normalization = 0
     raw_div_column_found = False
+    raw_div_populated_rows = 0
     source_div_populated_rows = 0
+    league_populated_rows = 0
     league_code_populated_rows = 0
     mapped_league_code_rows = 0
     future_fixtures_with_league_code_after_normalization = 0
@@ -538,7 +596,9 @@ def build_football_data_raw_file(
             future_fixtures_with_published_odds = upcoming_diagnostics.future_rows_with_published_odds
             upcoming_rows_after_normalization = upcoming_diagnostics.normalized_rows
             raw_div_column_found = upcoming_diagnostics.raw_div_column_found
+            raw_div_populated_rows = upcoming_diagnostics.raw_div_populated_rows
             source_div_populated_rows = upcoming_diagnostics.source_div_populated_rows
+            league_populated_rows = upcoming_diagnostics.league_populated_rows
             league_code_populated_rows = upcoming_diagnostics.league_code_populated_rows
             mapped_league_code_rows = upcoming_diagnostics.mapped_league_code_rows
             future_fixtures_with_league_code_after_normalization = upcoming_diagnostics.future_rows_with_league_code
@@ -583,6 +643,19 @@ def build_football_data_raw_file(
         if {"source_dataset", "league_code"}.issubset(set(deduped.columns))
         else 0
     )
+    dedup_upcoming = (
+        deduped.filter(pl.col("source_dataset") == "upcoming_fixtures_csv")
+        if "source_dataset" in deduped.columns
+        else pl.DataFrame([])
+    )
+    print(
+        "Upcoming fixtures stage=deduped:"
+        f" rows={dedup_upcoming.height}"
+        f" raw_div_populated_rows={_populated_count(dedup_upcoming, 'source_div')}"
+        f" source_div_populated_rows={_populated_count(dedup_upcoming, 'source_div')}"
+        f" league_populated_rows={_populated_count(dedup_upcoming, 'league')}"
+        f" league_code_populated_rows={_populated_count(dedup_upcoming, 'league_code')}"
+    )
     deduped.write_csv(output)
 
     if failed_sources:
@@ -599,7 +672,9 @@ def build_football_data_raw_file(
             f" bom_header_sanitized={bom_header_sanitized}"
             f" sanitized_header_count={sanitized_header_count}"
             f" raw_div_column_found={raw_div_column_found}"
+            f" raw_div_rows={raw_div_populated_rows}"
             f" source_div_rows={source_div_populated_rows}"
+            f" league_rows={league_populated_rows}"
             f" league_code_rows={league_code_populated_rows}"
             f" mapped_league_code_rows={mapped_league_code_rows}"
             f" league_code_created_from_source_div={mapped_league_code_rows > 0}"
