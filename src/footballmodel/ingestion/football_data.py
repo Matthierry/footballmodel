@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
+import unicodedata
 import polars as pl
 import requests
 import yaml
@@ -263,6 +264,21 @@ def _sanitize_csv_headers(df: pl.DataFrame) -> tuple[pl.DataFrame, bool, int]:
     return df.rename(rename_map), True, len(rename_map)
 
 
+def _normalize_header_for_matching(column: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(column))
+    normalized = (
+        normalized.replace("\ufeff", "")
+        .replace("\u00a0", " ")
+        .replace("\u200b", "")
+        .replace("\u200c", "")
+        .replace("\u200d", "")
+        .replace("\u2060", "")
+        .strip()
+        .lower()
+    )
+    return "".join(ch for ch in normalized if ch.isalnum())
+
+
 def _map_div_to_league_code_expr(column: str, *, csv_to_league: dict[str, str]) -> pl.Expr:
     return (
         pl.col(column)
@@ -384,7 +400,9 @@ def _parse_upcoming_fixtures_payload(
     payload_has_bom_header = "\ufeff" in first_line
     try:
         raw_frame = pl.read_csv(BytesIO(payload.encode("utf-8")), ignore_errors=True)
+        raw_columns_exact = [str(column) for column in raw_frame.columns]
         raw_frame, bom_header_sanitized, sanitized_header_count = _sanitize_csv_headers(raw_frame)
+        sanitized_columns = [str(column) for column in raw_frame.columns]
         if payload_has_bom_header and not bom_header_sanitized:
             bom_header_sanitized = True
             sanitized_header_count = max(sanitized_header_count, 1)
@@ -410,10 +428,15 @@ def _parse_upcoming_fixtures_payload(
         )
 
     lower_to_original = {str(col).strip().lower(): str(col) for col in raw_frame.columns}
+    normalized_to_original: dict[str, str] = {}
+    for column in raw_frame.columns:
+        normalized_key = _normalize_header_for_matching(str(column))
+        normalized_to_original.setdefault(normalized_key, str(column))
     rename_map: dict[str, str] = {}
     for canonical in ("Date", "Div", "HomeTeam", "AwayTeam", "FTHG", "FTAG"):
-        if canonical.lower() in lower_to_original:
-            rename_map[lower_to_original[canonical.lower()]] = canonical
+        normalized_canonical = _normalize_header_for_matching(canonical)
+        if normalized_canonical in normalized_to_original:
+            rename_map[normalized_to_original[normalized_canonical]] = canonical
 
     aliases: dict[str, tuple[str, ...]] = {
         "B365H": ("b365h", "home", "home_odds"),
@@ -425,11 +448,27 @@ def _parse_upcoming_fixtures_payload(
     }
     for target, candidates in aliases.items():
         for alias in candidates:
-            if alias in lower_to_original:
-                rename_map[lower_to_original[alias]] = target
+            normalized_alias = _normalize_header_for_matching(alias)
+            if normalized_alias in normalized_to_original:
+                rename_map[normalized_to_original[normalized_alias]] = target
                 break
 
     scoped = raw_frame.rename(rename_map)
+    selected_raw_div_column = normalized_to_original.get(_normalize_header_for_matching("Div"))
+    selected_div_column = rename_map.get(selected_raw_div_column, selected_raw_div_column) if selected_raw_div_column else None
+    if selected_div_column and selected_div_column in scoped.columns:
+        scoped = scoped.with_columns(
+            pl.col(selected_div_column).cast(pl.Utf8, strict=False).str.strip_chars().replace("", None).alias("source_div")
+        )
+    print(
+        "Upcoming fixtures column diagnostics:"
+        f" raw_frame.columns={raw_columns_exact}"
+        f" sanitized_columns={sanitized_columns}"
+        f" lower_to_original={lower_to_original}"
+        f" rename_map={rename_map}"
+        f" scoped.columns={scoped.columns}"
+        f" selected_division_column={selected_div_column}"
+    )
     if not {"Date", "HomeTeam", "AwayTeam"}.issubset(set(scoped.columns)):
         available = ", ".join(scoped.columns)
         raise RuntimeError(
@@ -482,7 +521,7 @@ def _parse_upcoming_fixtures_payload(
         if "league_code" in cleaned.columns
         else 0
     )
-    raw_div_rows = _populated_count(scoped, "Div")
+    raw_div_rows = _populated_count(scoped, selected_div_column) if selected_div_column else 0
     source_div_rows = _populated_count(cleaned, "source_div")
     league_rows = _populated_count(cleaned, "league")
     league_code_rows = _populated_count(cleaned, "league_code")
@@ -505,7 +544,7 @@ def _parse_upcoming_fixtures_payload(
         normalized_rows=cleaned.height,
         future_rows=future_rows,
         future_rows_with_published_odds=future_rows_with_published_odds,
-        raw_div_column_found="Div" in scoped.columns,
+        raw_div_column_found=selected_div_column is not None,
         raw_div_populated_rows=raw_div_rows,
         source_div_populated_rows=source_div_rows,
         league_populated_rows=league_rows,

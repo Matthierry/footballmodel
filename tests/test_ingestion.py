@@ -334,6 +334,37 @@ def test_parse_upcoming_fixtures_payload_sanitizes_bom_prefixed_div_header():
     assert diagnostics.league_code_populated_rows == 1
 
 
+@pytest.mark.parametrize(
+    ("div_header", "sanitized_minimum"),
+    [
+        ("\ufeffDiv", 1),
+        (" Div ", 1),
+        ("div", 0),
+        ("D i v", 0),
+        ("Div\u00a0", 1),
+    ],
+)
+def test_parse_upcoming_fixtures_payload_handles_div_header_variants(div_header: str, sanitized_minimum: int):
+    fixture_day = (date.today() + timedelta(days=2)).strftime("%d/%m/%Y")
+    payload = f"Date,{div_header},HomeTeam,AwayTeam,B365H,B365D,B365A\n{fixture_day},E0,Wigan,Reading,2.4,3.3,2.9\n"
+    parsed, diagnostics = _parse_upcoming_fixtures_payload(
+        payload,
+        source_url="https://example.test/fixtures.csv",
+        fetched_at_utc="2026-04-01T00:00:00+00:00",
+        csv_to_league={"E0": "ENG1"},
+    )
+
+    row = parsed.row(0, named=True)
+    assert row["source_div"] == "E0"
+    assert row["league_code"] == "ENG1"
+    assert row["league"] == "ENG1"
+    assert diagnostics.raw_div_column_found is True
+    assert diagnostics.raw_div_populated_rows == 1
+    assert diagnostics.source_div_populated_rows == 1
+    assert diagnostics.league_code_populated_rows == 1
+    assert diagnostics.sanitized_header_count >= sanitized_minimum
+
+
 def test_parse_upcoming_fixtures_payload_handles_schema_change_gracefully():
     payload = "Kickoff,Division,Home,Away\n2026-03-28 19:45,E0,Man City,Arsenal\n"
     with pytest.raises(RuntimeError, match="fixtures.csv schema changed"):
