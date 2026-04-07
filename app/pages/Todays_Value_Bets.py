@@ -4,7 +4,17 @@ import polars as pl
 import streamlit as st
 
 from footballmodel.storage.repository import DuckRepository
-from footballmodel.ui_dashboard import apply_premium_dark_theme, render_empty_state, apply_prediction_filters, load_core_data, prediction_detail_table, prediction_display_table, require_password_gate, today_scope
+from footballmodel.ui_dashboard import (
+    apply_prediction_filters,
+    apply_premium_dark_theme,
+    dark_dataframe,
+    load_core_data,
+    prediction_detail_table,
+    prediction_display_table,
+    render_empty_state,
+    require_password_gate,
+    today_scope,
+)
 
 apply_premium_dark_theme("Todays Value Bets")
 require_password_gate()
@@ -49,10 +59,17 @@ else:
     st.caption("Rows can be assessed but not value when thresholds are not met or benchmark is missing.")
 
     if scoped.is_empty():
-        st.info("No rows match current filters.")
+        if review.is_empty():
+            render_empty_state("No assessed selections are available for today's fixtures yet.")
+        else:
+            render_empty_state("No rows match current filters. Try widening market, league, or edge filters.")
+            fallback = apply_prediction_filters(review, market=market, league=league, fixture_search=fixture_q, min_edge=0.0, value_only=False)
+            if not fallback.is_empty():
+                st.caption("Top assessed opportunities by edge (fallback view).")
+                dark_dataframe(prediction_display_table(fallback.sort("edge", descending=True, nulls_last=True).head(12)))
     else:
-        st.dataframe(prediction_display_table(scoped.sort("edge", descending=True, nulls_last=True)), use_container_width=True)
+        dark_dataframe(prediction_display_table(scoped.sort("edge", descending=True, nulls_last=True)))
         st.subheader("Details (secondary)")
-        st.dataframe(prediction_detail_table(scoped), use_container_width=True)
+        dark_dataframe(prediction_detail_table(scoped))
 
 repo.close()

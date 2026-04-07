@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import altair as alt
 import polars as pl
 import streamlit as st
 
@@ -72,6 +73,56 @@ def apply_premium_dark_theme(page_title: str, page_icon: str = "📊") -> None:
             border: 1px solid var(--border);
             border-radius: 12px;
             overflow: hidden;
+            background: rgba(12, 18, 30, 0.9);
+        }
+        [data-testid="stTable"] {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            background: rgba(12, 18, 30, 0.9);
+        }
+        div[data-testid="stMetric"] {
+            background: linear-gradient(145deg, var(--panel), rgba(16, 22, 34, 0.75));
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 0.65rem 0.9rem;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.9rem;
+            font-weight: 800;
+            color: #f1f5fb;
+            text-shadow: 0 0 14px rgba(62,166,255,0.25);
+        }
+        div[data-testid="stMetricLabel"] {
+            color: var(--muted);
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-size: 0.72rem;
+        }
+        [data-baseweb="select"] > div,
+        [data-baseweb="input"] > div {
+            background: rgba(16, 23, 36, 0.95) !important;
+            border: 1px solid var(--border) !important;
+            color: var(--text) !important;
+        }
+        [data-baseweb="select"] span,
+        [data-baseweb="select"] div,
+        [data-baseweb="input"] input,
+        [data-baseweb="input"] input::placeholder {
+            color: var(--text) !important;
+        }
+        .stSelectbox label, .stTextInput label, .stNumberInput label {
+            color: var(--muted) !important;
+        }
+        [data-baseweb="popover"] {
+            background: rgba(16, 23, 36, 0.98) !important;
+            color: var(--text) !important;
+        }
+        .chart-shell {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(15, 22, 34, 0.88);
+            padding: 0.55rem;
         }
         .stButton > button {
             border: 1px solid rgba(62, 166, 255, 0.45);
@@ -96,6 +147,54 @@ def render_metric_card(label: str, value: str | int | float, *, tone: str = "inf
         ),
         unsafe_allow_html=True,
     )
+
+
+def dark_dataframe(df: pl.DataFrame, *, use_container_width: bool = True, hide_index: bool = True) -> None:
+    st.dataframe(df, use_container_width=use_container_width, hide_index=hide_index)
+
+
+def render_dark_bar_comparison(df: pl.DataFrame, *, title: str, category: str = "outcome") -> None:
+    if df.is_empty():
+        return
+    melted = (
+        df.select(
+            [
+                pl.col(category).cast(pl.Utf8),
+                pl.col("model_probability").cast(pl.Float64, strict=False),
+                pl.col("market_probability").cast(pl.Float64, strict=False),
+            ]
+        )
+        .melt(id_vars=[category], variable_name="series", value_name="probability")
+        .filter(pl.col("probability").is_not_null())
+        .with_columns(
+            pl.col("series")
+            .replace_strict({"model_probability": "Model", "market_probability": "Market"}, default="Series")
+            .alias("series")
+        )
+    )
+    if melted.is_empty():
+        return
+    st.markdown('<div class="chart-shell">', unsafe_allow_html=True)
+    st.markdown(f"**{title}**")
+    chart = (
+        alt.Chart(melted.to_pandas())
+        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+        .encode(
+            x=alt.X(f"{category}:N", title="Outcome", axis=alt.Axis(labelColor="#d7e1ef", titleColor="#9aa8bd")),
+            y=alt.Y("probability:Q", title="Probability", axis=alt.Axis(format=".0%", labelColor="#d7e1ef", titleColor="#9aa8bd")),
+            color=alt.Color(
+                "series:N",
+                scale=alt.Scale(domain=["Model", "Market"], range=["#3ea6ff", "#ffbe55"]),
+                legend=alt.Legend(labelColor="#d7e1ef", titleColor="#9aa8bd"),
+            ),
+            xOffset="series:N",
+            tooltip=[alt.Tooltip(f"{category}:N", title="Outcome"), alt.Tooltip("series:N", title="Series"), alt.Tooltip("probability:Q", format=".2%", title="Probability")],
+        )
+        .properties(height=250)
+        .configure(background="transparent", view=alt.ViewConfig(strokeOpacity=0))
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_empty_state(message: str) -> None:
@@ -135,6 +234,9 @@ def safe_table(repo: DuckRepository, table: str, *, order_by: str | None = None,
 
 def load_core_data(repo: DuckRepository) -> dict[str, pl.DataFrame]:
     review = safe_table(repo, "live_review_history", order_by="run_timestamp_utc desc")
+    live_predictions = safe_table(repo, "live_prediction_history", order_by="run_timestamp_utc desc")
+    model_predictions = safe_table(repo, "model_market_predictions", order_by="run_timestamp_utc desc")
+    model_runs = safe_table(repo, "model_runs", order_by="run_timestamp_utc desc")
     runs = safe_table(repo, "live_run_summaries_history", order_by="run_timestamp_utc desc")
     matches = safe_table(repo, "curated_matches")
     snapshots = safe_table(repo, "benchmark_snapshots", order_by="snapshot_timestamp_utc desc")
@@ -176,7 +278,15 @@ def load_core_data(repo: DuckRepository) -> dict[str, pl.DataFrame]:
         .otherwise(pl.lit("Assessed"))
         .alias("status"),
     )
-    return {"review": review, "runs": runs, "matches": matches, "snapshots": snapshots}
+    return {
+        "review": review,
+        "runs": runs,
+        "matches": matches,
+        "snapshots": snapshots,
+        "live_predictions": live_predictions,
+        "model_predictions": model_predictions,
+        "model_runs": model_runs,
+    }
 
 
 def fixture_label(_df: pl.DataFrame) -> pl.Expr:
