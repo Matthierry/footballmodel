@@ -34,6 +34,7 @@ if matches.is_empty() or elo_history.is_empty():
     st.info("Missing source tables for experiment sweep. Run ingestion first.")
 else:
     st.subheader("Sweep setup")
+    st.caption("Define window and leagues before generating candidate configurations.")
     min_day = matches["match_date"].min() or date(2020, 1, 1)
     max_day = matches["match_date"].max() or date.today()
     leagues = sorted(matches["league"].drop_nulls().unique().to_list())
@@ -44,6 +45,7 @@ else:
     sweep_leagues = st.multiselect("Leagues", options=leagues, default=leagues)
 
     st.subheader("Search space")
+    st.caption("Smaller search spaces run faster and are easier to interpret.")
     dixon_opts = st.multiselect("Dixon weights", [0.4, 0.5, 0.6, 0.7], default=[cfg.weights.dixon_coles])
     elo_opts = st.multiselect("ELO weights", [0.1, 0.2, 0.25, 0.3, 0.4], default=[cfg.weights.elo_prior])
     shot_opts = st.multiselect("Shot weights", [0.1, 0.15, 0.2, 0.25], default=[cfg.weights.shot_adjustment])
@@ -51,6 +53,7 @@ else:
     cred_opts = st.multiselect("Credibility thresholds", [0.45, 0.5, 0.55, 0.6, 0.65], default=[cfg.runtime.credibility_threshold])
 
     if st.button("Run optimisation sweep"):
+        st.caption("Running optimisation sweep; results will populate below.")
         req = SweepRequest(
             start_date=sweep_start,
             end_date=sweep_end,

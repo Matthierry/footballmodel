@@ -25,6 +25,7 @@ except Exception:
 cfg = load_app_config("config/runtime.yaml")
 
 st.subheader("Date range")
+st.caption("Choose an evaluation window for walk-forward simulation.")
 min_day = matches["match_date"].min() or date(2020, 1, 1)
 max_day = matches["match_date"].max() or date.today()
 c1, c2 = st.columns(2)
@@ -32,16 +33,19 @@ start_date = c1.date_input("Start date", value=min_day, min_value=min_day, max_v
 end_date = c2.date_input("End date", value=max_day, min_value=min_day, max_value=max_day)
 
 st.subheader("League universe")
+st.caption("Limit tests to leagues you actively trade.")
 league_options = sorted(matches["league"].drop_nulls().unique().to_list())
 leagues = st.multiselect("Leagues", options=league_options, default=league_options)
 
 st.subheader("Model weights")
+st.caption("Weights blend model components; keep total behaviour stable across tests.")
 w1, w2, w3 = st.columns(3)
 dixon = w1.number_input("Dixon-Coles", min_value=0.0, max_value=1.0, value=float(cfg.weights.dixon_coles), step=0.05)
 elo = w2.number_input("ELO prior", min_value=0.0, max_value=1.0, value=float(cfg.weights.elo_prior), step=0.05)
 shot = w3.number_input("Shot adjustment", min_value=0.0, max_value=1.0, value=float(cfg.weights.shot_adjustment), step=0.05)
 
 st.subheader("Runtime thresholds")
+st.caption("Thresholds determine how selective value-flagging is.")
 t1, t2, t3, t4 = st.columns(4)
 edge = t1.number_input("Value edge", min_value=0.0, max_value=1.0, value=float(cfg.runtime.value_edge_threshold), step=0.005)
 cred = t2.number_input("Credibility", min_value=0.0, max_value=1.0, value=float(cfg.runtime.credibility_threshold), step=0.01)
@@ -51,7 +55,8 @@ half_life_days = t4.number_input("Half-life days", min_value=5, max_value=365, v
 stake = st.number_input("Flat stake", min_value=0.1, value=1.0, step=0.1)
 calibration_min_samples = st.number_input("Calibration min samples", min_value=10, max_value=500, value=50, step=10)
 
-if st.button("Run backtest"):
+if st.button("Run backtest now"):
+    st.caption("Running simulation... this can take a while for long date ranges.")
     request = BacktestRequest(
         start_date=start_date,
         end_date=end_date,
