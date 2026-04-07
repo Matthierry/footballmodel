@@ -9,8 +9,10 @@ from footballmodel.live.monitoring import (
     build_email_alert_events,
     build_live_review_rows,
     build_live_run_summary,
+    build_snapshot_review_rows,
     detect_drift_alerts,
 )
+from footballmodel.orchestration.pipeline import build_prediction_time_benchmark_snapshots
 
 
 def test_named_default_live_config_is_resolvable():
@@ -77,6 +79,72 @@ def test_live_review_rows_include_clv_and_settlement_status():
     assert pending["settlement_status"] == "pending"
     assert pending["later_snapshot_type"] is None
     assert pending["clv"] is None
+
+
+def test_prediction_snapshot_creation_builds_single_snapshot_set():
+    fixture = {
+        "fixture_id": "f100",
+        "match_date": date(2026, 1, 10),
+        "avg_home_odds": 2.1,
+        "avg_draw_odds": 3.2,
+        "avg_away_odds": 3.5,
+    }
+    snapshots = build_prediction_time_benchmark_snapshots(
+        fixture=fixture,
+        prediction_timestamp_utc="2026-01-01T10:00:00",
+    )
+    assert snapshots.filter(pl.col("snapshot_type") == "prediction_time").height == snapshots.height
+    assert snapshots["snapshot_timestamp_utc"].n_unique() == 1
+
+
+def test_settlement_enrichment_uses_closing_only_without_multi_snapshot_concat():
+    predictions = pl.DataFrame(
+        {
+            "live_run_id": ["live_2"],
+            "run_timestamp_utc": ["2026-01-01T10:00:00"],
+            "config_name": ["champion_v1"],
+            "config_version": ["2026.03.1"],
+            "fixture_id": ["f3"],
+            "prediction_timestamp_utc": ["2026-01-01T10:00:00"],
+            "market": ["1X2"],
+            "outcome": ["home"],
+            "line": [None],
+            "raw_probability": [0.5],
+            "calibrated_probability": [0.5],
+            "current_price": [2.2],
+            "benchmark_source": ["exchange"],
+            "value_flag": [True],
+            "value_status": ["assessed"],
+        }
+    )
+    snapshots = pl.DataFrame(
+        {
+            "fixture_id": ["f3"],
+            "market": ["1X2"],
+            "outcome": ["home"],
+            "line": [None],
+            "benchmark_price": [2.0],
+            "benchmark_source": ["exchange"],
+            "snapshot_type": ["closing"],
+            "snapshot_timestamp_utc": ["2026-01-01T19:00:00"],
+        }
+    )
+    matches = pl.DataFrame(
+        {
+            "fixture_id": ["f3"],
+            "match_date": [date(2026, 1, 1)],
+            "league": ["ENG1"],
+            "home_team": ["A"],
+            "away_team": ["B"],
+            "home_goals": [2],
+            "away_goals": [0],
+        }
+    )
+    review = build_snapshot_review_rows(predictions, snapshots, matches)
+    row = review.row(0, named=True)
+    assert row["later_snapshot_type"] == "closing"
+    assert row["settlement_status"] == "settled"
+    assert row["clv"] is not None
 
 
 def test_live_run_summary_rolls_up_audit_metrics():

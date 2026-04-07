@@ -8,7 +8,6 @@ from footballmodel.markets.benchmark import resolve_benchmark_price
 
 
 SNAPSHOT_TYPE_PREDICTION_TIME = "prediction_time"
-SNAPSHOT_TYPE_PRE_KICKOFF_LATEST = "pre_kickoff_latest"
 SNAPSHOT_TYPE_CLOSING = "closing"
 SNAPSHOT_TYPE_CLOSING_SURROGATE = "closing_surrogate"
 
@@ -63,7 +62,6 @@ def choose_later_snapshot(snapshot_rows: pl.DataFrame) -> dict[str, object] | No
     if snapshot_rows.is_empty():
         return None
     for preferred in (
-        SNAPSHOT_TYPE_PRE_KICKOFF_LATEST,
         SNAPSHOT_TYPE_CLOSING,
         SNAPSHOT_TYPE_CLOSING_SURROGATE,
     ):
