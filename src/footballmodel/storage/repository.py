@@ -212,8 +212,21 @@ class DuckRepository:
     def append_df(self, table: str, df: pl.DataFrame) -> None:
         self._validate_dataframe(table, df, operation="append")
         self.con.register("tmp_df", df.to_arrow())
-        self.con.execute(f"create table if not exists {table} as select * from tmp_df where 1=0")
-        self.con.execute(f"insert into {table} select * from tmp_df")
+        if not self.has_table(table):
+            schema = OPTIONAL_TABLE_SCHEMAS.get(table)
+            if schema is None:
+                self.con.execute(f"create table if not exists {table} as select * from tmp_df where 1=0")
+            else:
+                self.con.register("tmp_empty_df", pl.DataFrame(schema=schema).to_arrow())
+                self.con.execute(f"create table if not exists {table} as select * from tmp_empty_df where 1=0")
+
+        target_columns = self._table_columns(table)
+        source_columns = set(df.columns)
+        target_column_sql = ", ".join(target_columns)
+        select_sql = ", ".join(
+            [column if column in source_columns else f"null as {column}" for column in target_columns]
+        )
+        self.con.execute(f"insert into {table} ({target_column_sql}) select {select_sql} from tmp_df")
 
     def read_df(self, query: str) -> pl.DataFrame:
         # NOTE:
@@ -259,3 +272,9 @@ class DuckRepository:
                 f"Cannot {operation} dataframe with zero columns into '{table}'. "
                 "Provide an explicit schema or skip persistence for this table."
             )
+
+    def _table_columns(self, table: str) -> list[str]:
+        return [
+            row[1]
+            for row in self.con.execute(f"pragma table_info('{table}')").fetchall()
+        ]

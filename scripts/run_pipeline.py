@@ -107,6 +107,19 @@ EMAIL_ALERT_SCHEMA: dict[str, pl.DataType] = {
     "channel": pl.Utf8,
 }
 
+MODEL_RUN_COLUMNS = [
+    "fixture_id",
+    "timestamp_utc",
+    "home_team",
+    "away_team",
+    "expected_home_goals",
+    "expected_away_goals",
+    "live_run_id",
+    "run_timestamp_utc",
+    "config_name",
+    "config_version",
+]
+
 
 def _frame_with_schema(rows: list[dict[str, object]], schema: dict[str, pl.DataType]) -> pl.DataFrame:
     return pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
@@ -296,7 +309,7 @@ def main() -> None:
                 }
             )
 
-    run_predictions_df = pl.DataFrame(predictions)
+    run_predictions_df = pl.DataFrame(predictions).select(MODEL_RUN_COLUMNS) if predictions else pl.DataFrame([])
     prediction_history_df = pl.DataFrame(prediction_markets)
 
     repo.write_df("curated_matches", matches)
